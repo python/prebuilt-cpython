@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Discussions
+    url: https://github.com/python/prebuilt-cpython/discussions/categories/general
+    about: Things that don't have an answer yet (issues are for things that have been agreed upon)
