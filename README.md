@@ -15,7 +15,7 @@ This repository is for the discussion and planning around providing prebuilt dev
 - Fully self-contained (i.e. the entire interpreter plus standard library does **not** have to be a single file)
 
 ## Workflow
-Discussions that have no answer yet go to [General discussions category](https://github.com/python/prebuilt-cpython/discussions/categories/general). As decisions are made, the discussions will be marked as answered. Anything that requires an action be taken will have an issue created.
+Discussions that have no answer yet go to [General discussions category](https://github.com/python/prebuilt-cpython/discussions/categories/general). As decisions are made, the discussions will be marked as answered. Anything that requires an action be taken will have an [issue](https://github.com/python/prebuilt-cpython/issues) created.
 
 ## Project Representatives
 These are people representing projects that have experience with prebuilt binaries for CPython.
