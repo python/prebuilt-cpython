@@ -20,4 +20,4 @@ Discussions that have no answer yet go to [General discussions category](https:/
 ## Project Representatives
 These are people representing projects that have experience with prebuilt binaries for CPython.
 
-- CPython: @brettcannon
+- [CPython](https://github.com/python/cpython): @brettcannon
