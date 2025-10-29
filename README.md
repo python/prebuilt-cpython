@@ -24,4 +24,4 @@ These are people representing projects that have experience with prebuilt binari
 
 - [CPython](https://github.com/python/cpython): @brettcannon, @zooba, @emmatyping
 - [python-build-standalone](https://github.com/astral-sh/python-build-standalone): ?
-- [BeeWare](https://beeware.org/): ?
+- [BeeWare](https://beeware.org/): @freakboy3742, @mhsmith
