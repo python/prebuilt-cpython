@@ -23,5 +23,5 @@ The general expectation is that no code will live in this repo and instead code 
 These are people representing projects that have experience with prebuilt binaries for CPython.
 
 - [CPython](https://github.com/python/cpython): @brettcannon, @zooba, @emmatyping
-- [python-build-standalone](https://github.com/astral-sh/python-build-standalone): ?
+- [python-build-standalone](https://github.com/astral-sh/python-build-standalone): @zanieb, @geofft, @jjhelmus
 - [BeeWare](https://beeware.org/): @freakboy3742, @mhsmith
