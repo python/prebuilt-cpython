@@ -22,6 +22,6 @@ The general expectation is that no code will live in this repo and instead code 
 ## Project Representatives
 These are people representing projects that have experience with prebuilt binaries for CPython.
 
-- [CPython](https://github.com/python/cpython): @brettcannon, @zooba, @emmatyping
+- [CPython](https://github.com/python/cpython): @brettcannon, @zooba, @emmatyping, @ned-deily
 - [python-build-standalone](https://github.com/astral-sh/python-build-standalone): @zanieb, @geofft, @jjhelmus
 - [BeeWare](https://beeware.org/): @freakboy3742, @mhsmith
