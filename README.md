@@ -25,3 +25,4 @@ These are people representing projects that have experience with prebuilt binari
 - [CPython](https://github.com/python/cpython): @brettcannon, @zooba, @emmatyping, @ned-deily
 - [python-build-standalone](https://github.com/astral-sh/python-build-standalone): @zanieb, @geofft, @jjhelmus
 - [BeeWare](https://beeware.org/): @freakboy3742, @mhsmith
+- [pyr](https://github.com/jasenc7/pyr): @jasenc7
