@@ -111,12 +111,12 @@ def run_gather(
         cwd=build_dir,
         check=True,
     )
-    patch_path(output_dir, os.fspath(install_dir))
     if strategy == "origin":
         # python-build-standalone also patches CPython's source, rewrites
         # scripts and metadata, handles Mach-O, and ships shared libpython.
         # Those are intentionally excluded from this post-build ELF experiment.
         patch_origin(output_dir)
+    patch_path(output_dir, os.fspath(install_dir))
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
