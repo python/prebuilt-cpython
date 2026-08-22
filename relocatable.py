@@ -8,6 +8,8 @@ This script is meant to serve two purposes:
 
 # /// script
 # requires-python = ">=3.14"
+# ///
+
 import argparse
 import os
 import pathlib
