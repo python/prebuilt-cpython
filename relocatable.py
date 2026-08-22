@@ -8,7 +8,7 @@ import pathlib
 import subprocess
 
 
-def get_install_prefix() -> str:
+def placeholder_prefix() -> str:
     """Return the placeholder prefix used when building CPython."""
     return "/the/knights/who/say/ni".ljust(255, "i")
 
@@ -20,7 +20,7 @@ def run_configure(source_dir: pathlib.Path, build_dir: pathlib.Path) -> None:
     subprocess.run(
         [
             configure,
-            f"--prefix={get_install_prefix()}",
+            f"--prefix={placeholder_prefix()}",
             "--without-static-libpython",
         ],
         cwd=build_dir,
