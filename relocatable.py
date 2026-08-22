@@ -105,6 +105,7 @@ def run_gather(
     subprocess.run(
         [
             "make",
+            "-s",
             "commoninstall",
             f"prefix={output_dir}",
         ],
