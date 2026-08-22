@@ -17,9 +17,6 @@ import shutil
 import subprocess
 
 
-_USE_OUTPUT_DIR = object()
-
-
 def placeholder_prefix() -> str:
     """Return the placeholder prefix used when building CPython."""
     return "/the/knights/who/say/ni".ljust(255, "i")
@@ -157,7 +154,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     patch_group.add_argument(
         "--patch",
         nargs="?",
-        const=_USE_OUTPUT_DIR,
+        const=None,
         type=pathlib.Path,
         metavar="INSTALL_DIR",
         help=(
@@ -168,7 +165,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     patch_group.add_argument(
         "--origin",
         nargs="?",
-        const=_USE_OUTPUT_DIR,
+        const=None,
         type=pathlib.Path,
         metavar="INSTALL_DIR",
         help=(
@@ -188,7 +185,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         else:
             namespace.patch_strategy = "origin"
             install_dir = namespace.origin
-        if install_dir is _USE_OUTPUT_DIR:
+        if install_dir is None:
             install_dir = namespace.output_dir
         namespace.install_dir = install_dir
     return namespace
