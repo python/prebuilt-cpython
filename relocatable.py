@@ -155,6 +155,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--patch",
         nargs="?",
         const=None,
+        default=argparse.SUPPRESS,
         type=pathlib.Path,
         metavar="INSTALL_DIR",
         help=(
@@ -166,6 +167,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--origin",
         nargs="?",
         const=None,
+        default=argparse.SUPPRESS,
         type=pathlib.Path,
         metavar="INSTALL_DIR",
         help=(
@@ -179,7 +181,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     if namespace.command == "gather" and namespace.output_dir is None:
         namespace.output_dir = namespace.source_dir / "dist"
     if namespace.command == "gather":
-        if namespace.patch is not None:
+        if hasattr(namespace, "patch"):
             namespace.patch_strategy = "patch"
             install_dir = namespace.patch
         else:
