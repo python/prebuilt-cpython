@@ -13,6 +13,30 @@ def placeholder_prefix() -> str:
     return "/the/knights/who/say/ni".ljust(255, "i")
 
 
+def patch_path(output_dir: pathlib.Path, patch: str) -> None:
+    """Replace placeholder prefixes with an eventual installation path."""
+    target = os.fsencode(pathlib.Path(patch).resolve())
+    placeholder = os.fsencode(placeholder_prefix())
+    if len(target) > len(placeholder):
+        raise ValueError(
+            f"resolved patch path is {len(target)} bytes; "
+            f"the maximum is {len(placeholder)} bytes"
+        )
+
+    for root, _, filenames in output_dir.walk():
+        for filename in filenames:
+            path = root / filename
+            if path.is_symlink():
+                continue
+            contents = path.read_bytes()
+            if placeholder not in contents:
+                continue
+            replacement = target
+            if b"\0" in contents:
+                replacement = target.ljust(len(placeholder), b"\0")
+            path.write_bytes(contents.replace(placeholder, replacement))
+
+
 def run_configure(source_dir: pathlib.Path, build_dir: pathlib.Path) -> None:
     """Run `configure` in the build directory."""
     configure = source_dir.resolve() / "configure"
@@ -41,8 +65,12 @@ def run_gather(
     source_dir: pathlib.Path,
     build_dir: pathlib.Path,
     output_dir: pathlib.Path,
+    patch: str,
 ) -> None:
     """Gather all the release files together."""
+    if patch == "origin":
+        raise ValueError("the 'origin' patch mode is not supported yet")
+
     output_dir = output_dir.resolve()
     subprocess.run(
         [
@@ -53,6 +81,7 @@ def run_gather(
         cwd=build_dir,
         check=True,
     )
+    patch_path(output_dir, patch)
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
@@ -86,6 +115,15 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         type=pathlib.Path,
         help="distribution directory (default: SOURCE_DIR/dist)",
     )
+    gather_parser.add_argument(
+        "--patch",
+        required=True,
+        metavar="INSTALL_DIR",
+        help=(
+            "eventual install directory; relative paths resolve from the current "
+            "directory ('origin' is reserved for future use)"
+        ),
+    )
     namespace = parser.parse_args(args)
     if namespace.build_dir is None:
         namespace.build_dir = namespace.source_dir / "builddir"
@@ -102,7 +140,12 @@ def main(args: list[str] | None = None) -> None:
         case "make":
             run_make(namespace.source_dir, namespace.build_dir)
         case "gather":
-            run_gather(namespace.source_dir, namespace.build_dir, namespace.output_dir)
+            run_gather(
+                namespace.source_dir,
+                namespace.build_dir,
+                namespace.output_dir,
+                namespace.patch,
+            )
         case command:
             raise ValueError(f"Unknown command: {command}")
 
