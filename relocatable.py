@@ -1,11 +1,21 @@
-"""Make a relocatable build of CPython."""
+"""Make a relocatable build of CPython.
+
+This script is meant to serve two purposes:
+
+1. Test/show different approaches to making a relocatable build of CPython.
+2. Provide an easy way to test a relocatable build so fixes can get upstreamed.
+"""
 
 # /// script
 # requires-python = ">=3.14"
 import argparse
 import os
 import pathlib
+import shutil
 import subprocess
+
+
+_USE_OUTPUT_DIR = object()
 
 
 def placeholder_prefix() -> str:
@@ -37,6 +47,27 @@ def patch_path(output_dir: pathlib.Path, patch: str) -> None:
             path.write_bytes(contents.replace(placeholder, replacement))
 
 
+def patch_origin(output_dir: pathlib.Path) -> None:
+    """Make installed ELF files load libraries relative to themselves."""
+    lib_dir = output_dir / "lib"
+    for root, _, filenames in output_dir.walk():
+        for filename in filenames:
+            path = root / filename
+            if path.is_symlink():
+                continue
+            with path.open("rb") as file:
+                if file.read(4) != b"\x7fELF":
+                    continue
+            relative_lib = os.path.relpath(lib_dir, path.parent)
+            rpath = "$ORIGIN"
+            if relative_lib != ".":
+                rpath = f"{rpath}/{relative_lib}"
+            subprocess.run(
+                ["patchelf", "--force-rpath", "--set-rpath", rpath, path],
+                check=True,
+            )
+
+
 def run_configure(source_dir: pathlib.Path, build_dir: pathlib.Path) -> None:
     """Run `configure` in the build directory."""
     configure = source_dir.resolve() / "configure"
@@ -65,13 +96,13 @@ def run_gather(
     source_dir: pathlib.Path,
     build_dir: pathlib.Path,
     output_dir: pathlib.Path,
-    patch: str,
+    strategy: str,
+    install_dir: pathlib.Path,
 ) -> None:
     """Gather all the release files together."""
-    if patch == "origin":
-        raise ValueError("the 'origin' patch mode is not supported yet")
-
     output_dir = output_dir.resolve()
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
     subprocess.run(
         [
             "make",
@@ -81,7 +112,12 @@ def run_gather(
         cwd=build_dir,
         check=True,
     )
-    patch_path(output_dir, patch)
+    patch_path(output_dir, os.fspath(install_dir))
+    if strategy == "origin":
+        # python-build-standalone also patches CPython's source, rewrites
+        # scripts and metadata, handles Mach-O, and ships shared libpython.
+        # Those are intentionally excluded from this post-build ELF experiment.
+        patch_origin(output_dir)
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
@@ -115,13 +151,27 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         type=pathlib.Path,
         help="distribution directory (default: SOURCE_DIR/dist)",
     )
-    gather_parser.add_argument(
+    patch_group = gather_parser.add_mutually_exclusive_group(required=True)
+    patch_group.add_argument(
         "--patch",
-        required=True,
+        nargs="?",
+        const=_USE_OUTPUT_DIR,
+        type=pathlib.Path,
         metavar="INSTALL_DIR",
         help=(
-            "eventual install directory; relative paths resolve from the current "
-            "directory ('origin' is reserved for future use)"
+            "patch in the eventual install directory (default: OUTPUT); "
+            "relative paths resolve from the current directory"
+        ),
+    )
+    patch_group.add_argument(
+        "--origin",
+        nargs="?",
+        const=_USE_OUTPUT_DIR,
+        type=pathlib.Path,
+        metavar="INSTALL_DIR",
+        help=(
+            "patch in the eventual install directory and use $ORIGIN for ELF "
+            "library lookup (default: OUTPUT; Linux only; requires patchelf)"
         ),
     )
     namespace = parser.parse_args(args)
@@ -129,6 +179,16 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         namespace.build_dir = namespace.source_dir / "builddir"
     if namespace.command == "gather" and namespace.output_dir is None:
         namespace.output_dir = namespace.source_dir / "dist"
+    if namespace.command == "gather":
+        if namespace.patch is not None:
+            namespace.patch_strategy = "patch"
+            install_dir = namespace.patch
+        else:
+            namespace.patch_strategy = "origin"
+            install_dir = namespace.origin
+        if install_dir is _USE_OUTPUT_DIR:
+            install_dir = namespace.output_dir
+        namespace.install_dir = install_dir
     return namespace
 
 
@@ -144,7 +204,8 @@ def main(args: list[str] | None = None) -> None:
                 namespace.source_dir,
                 namespace.build_dir,
                 namespace.output_dir,
-                namespace.patch,
+                namespace.patch_strategy,
+                namespace.install_dir,
             )
         case command:
             raise ValueError(f"Unknown command: {command}")
