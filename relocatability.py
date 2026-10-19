@@ -6,6 +6,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -52,6 +53,9 @@ data = {
     "path": sys.path,
     "config_paths": sysconfig.get_paths(),
     "config_vars": {key: sysconfig.get_config_var(key) for key in keys},
+    "ext_suffix": sysconfig.get_config_var("EXT_SUFFIX"),
+    "ldshared": sysconfig.get_config_var("LDSHARED"),
+    "ccshared": sysconfig.get_config_var("CCSHARED"),
 }
 print(json.dumps(data, sort_keys=True))
 """
@@ -104,6 +108,75 @@ def find_interpreter(root: pathlib.Path) -> pathlib.Path:
     if not python.is_file():
         raise CheckFailed("no installed Python executable found", [os.fspath(python)])
     return python
+
+
+def loader_paths(output: str, platform: str) -> list[str]:
+    """Return the absolute library paths in `otool` or `readelf` output."""
+    paths = []
+    if platform == "darwin":
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped or (line.startswith("/") and stripped.endswith(":")):
+                continue
+            if stripped.startswith(("path ", "name ")):
+                value = stripped.split(None, 1)[1].rsplit(" (offset ", 1)[0]
+            elif line[:1].isspace():
+                value = stripped.rsplit(" (", 1)[0]
+            else:
+                continue
+            if value.startswith("/"):
+                paths.append(value)
+    elif platform.startswith("linux"):
+        for line in output.splitlines():
+            if "(RPATH)" not in line and "(RUNPATH)" not in line:
+                continue
+            match = re.search(r"\[([^]]*)\]", line)
+            if match:
+                values = match.group(1).split(":")
+                paths.extend(value for value in values if value.startswith("/"))
+    return paths
+
+
+BUILD_DETAILS_PATHS = (
+    "base_interpreter",
+    "libpython.dynamic",
+    "libpython.dynamic_stableabi",
+    "libpython.static",
+    "c_api.headers",
+    "c_api.pkgconfig_path",
+)
+
+
+def build_details_problems(
+    data: dict[str, Any], directory: pathlib.Path, root: pathlib.Path
+) -> list[str]:
+    """Return paths in PEP 739 *data* that are outside *root* or missing.
+
+    *directory* holds build-details.json. PEP 739 says a relative `base_prefix`
+    is relative to that directory, and other relative paths are relative to
+    `base_prefix`.
+    """
+    base_prefix = data.get("base_prefix")
+    if not isinstance(base_prefix, str):
+        return [f"base_prefix={base_prefix!r}"]
+    resolved_base = directory / base_prefix
+    problems = []
+    if not path_is_within(resolved_base, root):
+        problems.append(f"base_prefix={base_prefix!r}")
+    for key in BUILD_DETAILS_PATHS:
+        *parents, child = key.split(".")
+        container = data
+        for part in parents:
+            container = container.get(part, {})
+        value = container.get(child)
+        if not isinstance(value, str):
+            continue
+        resolved = resolved_base / value
+        if not path_is_within(resolved, root):
+            problems.append(f"{key}={value!r} is outside the relocated tree")
+        elif not resolved.exists():
+            problems.append(f"{key}={value!r} does not exist")
+    return problems
 
 
 def find_build_interpreter(build_dir: pathlib.Path) -> pathlib.Path:
@@ -207,6 +280,8 @@ class RelocatabilityHarness:
         self._check("runtime.startup", self._check_startup)
         self._check("runtime.paths", self._check_runtime_paths)
         self._check("metadata.prefix-leaks", self._check_prefix_leaks)
+        self._check("metadata.build-details", self._check_build_details)
+        self._check("developer.python-config", self._check_python_config)
         for module in STDLIB_PROBES:
             self._check(
                 f"stdlib.{module}",
@@ -214,6 +289,8 @@ class RelocatabilityHarness:
             )
         self._check("runtime.symlink", self._check_symlink)
         self._check("runtime.venv", self._check_venv)
+        self._check("developer.c-extension", self._check_c_extension)
+        self._check("loader.paths", self._check_loader_paths)
         if self.full:
             self._check("stdlib.full-suite", self._check_full_suite)
         return self.results
@@ -419,6 +496,78 @@ class RelocatabilityHarness:
             )
         return f"scanned {files_checked} installed files"
 
+    def _check_build_details(self) -> str:
+        files = list(self.root.rglob("build-details.json"))
+        if not files:
+            raise CheckFailed("build-details.json is not installed")
+        failures: list[str] = []
+        for path in files:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                failures.append(f"{path}: {exc}")
+                continue
+            failures.extend(
+                f"{path}: {problem}" for problem in build_details_problems(
+                    data, path.parent, self.root
+                )
+            )
+        if failures:
+            raise CheckFailed(
+                "build-details.json contains non-relocated paths", failures
+            )
+        return f"validated {len(files)} build-details.json file(s)"
+
+    def _python_config(self) -> pathlib.Path:
+        candidates = sorted((self.root / "bin").glob("python*-config"))
+        if not candidates:
+            raise CheckFailed("no installed python-config script found")
+        config = candidates[0]
+        try:
+            first_line = config.open(encoding="utf-8").readline().strip()
+        except (OSError, UnicodeError) as exc:
+            raise CheckFailed("could not read the installed python-config", [str(exc)])
+        if first_line.startswith("#!"):
+            interpreter = first_line[2:].split()[0]
+            if interpreter.startswith("/") and not pathlib.Path(interpreter).exists():
+                raise CheckFailed(
+                    "python-config has a stale shebang",
+                    [f"{config}: {first_line}"],
+                )
+        return config
+
+    def _check_python_config(self) -> str:
+        config = self._python_config()
+        outputs = {}
+        errors = []
+        for option in (
+            "--prefix",
+            "--exec-prefix",
+            "--includes",
+            "--ldflags",
+            "--extension-suffix",
+        ):
+            completed = self._run([config, option])
+            self._require_success(completed, f"python-config {option} failed")
+            outputs[option] = completed.stdout.strip()
+            if completed.stderr.strip():
+                errors.append(f"{option} stderr: {completed.stderr.strip()}")
+
+        failures = []
+        for option in ("--prefix", "--exec-prefix"):
+            if not path_is_within(outputs[option], self.root):
+                failures.append(f"{option} reports {outputs[option]!r}")
+        output = "\n".join(outputs.values())
+        for prefix, label in self._stale_prefixes().items():
+            if prefix in output:
+                failures.append(f"output contains the {label}")
+        if failures:
+            failures.append(f"output:\n{output}")
+            # The shell python-config can fail on stderr and still exit 0.
+            failures.extend(errors)
+            raise CheckFailed("python-config reports stale paths", failures)
+        return "python-config reports the relocated prefix"
+
     def _check_stdlib(self, module: str) -> str:
         if self.broken_modules is not None and module in self.broken_modules:
             raise CheckSkipped(
@@ -472,6 +621,141 @@ class RelocatabilityHarness:
         if failures:
             raise CheckFailed("the venv contains stale paths", failures)
         return "a venv created by the relocated interpreter works"
+
+    def _check_c_extension(self) -> str:
+        if self.snapshot is None:
+            raise CheckSkipped("the startup probe did not complete")
+        config = self._python_config()
+        includes = self._run([config, "--includes"])
+        self._require_success(includes, "python-config --includes failed")
+        ldshared = self.snapshot.get("ldshared")
+        ext_suffix = self.snapshot.get("ext_suffix")
+        if not isinstance(ldshared, str) or not ldshared:
+            raise CheckFailed("sysconfig did not provide LDSHARED")
+        if not isinstance(ext_suffix, str) or not ext_suffix:
+            raise CheckFailed("sysconfig did not provide EXT_SUFFIX")
+
+        extension_dir = self.work_dir / "extension"
+        extension_dir.mkdir(exist_ok=True)
+        source = extension_dir / "reloc_probe.c"
+        source.write_text(
+            """
+#include <Python.h>
+
+static PyObject *
+answer(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(ignored))
+{
+    return PyLong_FromLong(42);
+}
+
+static PyMethodDef reloc_probe_methods[] = {
+    {.ml_name = "answer", .ml_meth = answer, .ml_flags = METH_NOARGS},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyModuleDef_Slot reloc_probe_slots[] = {
+    {Py_mod_multiple_interpreters, Py_MOD_PER_INTERPRETER_GIL_SUPPORTED},
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+    {0, NULL},
+};
+
+static struct PyModuleDef reloc_probe_module = {
+    .m_base = PyModuleDef_HEAD_INIT,
+    .m_name = "reloc_probe",
+    .m_size = 0,
+    .m_methods = reloc_probe_methods,
+    .m_slots = reloc_probe_slots,
+};
+
+PyMODINIT_FUNC
+PyInit_reloc_probe(void)
+{
+    return PyModuleDef_Init(&reloc_probe_module);
+}
+""".lstrip(),
+            encoding="utf-8",
+        )
+        extension = extension_dir / f"reloc_probe{ext_suffix}"
+        command = [
+            *shlex.split(ldshared),
+            # e.g. -fPIC on Linux; LDSHARED doesn't include it.
+            *shlex.split(self.snapshot.get("ccshared") or ""),
+            *shlex.split(includes.stdout),
+            os.fspath(source),
+            "-o",
+            os.fspath(extension),
+        ]
+        completed = self._run(command, cwd=extension_dir)
+        self._require_success(completed, "compiling a C extension failed")
+        probe = (
+            "import os, sys; sys.path.insert(0, os.getcwd()); "
+            "import reloc_probe; assert reloc_probe.answer() == 42"
+        )
+        completed = self._run_python(["-I", "-c", probe], cwd=extension_dir)
+        self._require_success(completed, "importing the compiled C extension failed")
+        return "compiled and imported a C extension"
+
+    def _binaries(self) -> list[pathlib.Path]:
+        files = []
+        if self.python is not None:
+            files.append(self.python.resolve())
+        for pattern in ("*.so", "*.dylib"):
+            files.extend(path for path in self.root.rglob(pattern) if path.is_file())
+        return sorted(set(files))
+
+    def _check_loader_paths(self) -> str:
+        if sys.platform == "darwin":
+            tool = shutil.which("otool")
+            commands = ([tool, "-L"], [tool, "-l"]) if tool else ()
+        elif sys.platform.startswith("linux"):
+            tool = shutil.which("readelf")
+            commands = ([tool, "-d"],) if tool else ()
+        else:
+            raise CheckSkipped(
+                f"loader inspection is not implemented on {sys.platform}"
+            )
+        if not commands:
+            raise CheckSkipped("the platform loader inspection tool is unavailable")
+
+        failures: list[str] = []
+        inspected = []
+        for path in self._binaries():
+            outputs = []
+            for prefix in commands:
+                completed = self._run([*prefix, path])
+                if completed.returncode:
+                    continue
+                outputs.append(completed.stdout)
+            if not outputs:
+                continue
+            inspected.append(path)
+            output = "\n".join(outputs)
+            for prefix, label in self._stale_prefixes().items():
+                if prefix in output:
+                    failures.append(f"{path}: loader metadata contains the {label}")
+            for value in loader_paths(output, sys.platform):
+                if path_is_within(value, self.root):
+                    continue
+                system_prefixes = (
+                    "/lib/",
+                    "/lib64/",
+                    "/usr/lib/",
+                    "/System/Library/",
+                )
+                if value.startswith(system_prefixes):
+                    continue
+                failures.append(f"{path}: loader metadata references {value}")
+        if failures:
+            raise CheckFailed(
+                "loader metadata contains stale paths", failures[:50]
+            )
+        if not inspected:
+            raise CheckSkipped("no binaries could be inspected")
+        interpreter = self.python.resolve() if self.python is not None else None
+        libraries = sum(path != interpreter for path in inspected)
+        if interpreter in inspected:
+            return f"inspected the interpreter and {libraries} shared libraries"
+        return f"inspected {libraries} shared libraries"
 
     def _check_full_suite(self) -> str:
         completed = self._run_python(

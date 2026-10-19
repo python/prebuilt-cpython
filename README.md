@@ -53,6 +53,9 @@ Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a
 - A few stdlib extension modules still work (ones that already fail in the build directory are skipped)
 - Those paths are still right when Python is run through a symlink
 - A venv created from it works
+- `build-details.json` and `python-config` give paths inside the moved tree
+- A C extension builds against it and imports
+- Native files don't link against libraries outside the moved tree
 
 Each check prints `PASS`, `FAIL`, or `SKIP`. Some checks fail today. That's expected: they show what CPython still needs to fix.
 
