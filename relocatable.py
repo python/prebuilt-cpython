@@ -82,8 +82,14 @@ def patch_origin(output_dir: pathlib.Path) -> None:
             if path.is_symlink():
                 continue
             with path.open("rb") as file:
-                if file.read(4) != b"\x7fELF":
-                    continue
+                header = file.read(18)
+            if len(header) < 18 or header[:4] != b"\x7fELF":
+                continue
+            # Only executables and shared objects (ET_EXEC and ET_DYN) have an
+            # rpath; patchelf rejects relocatable objects such as python.o.
+            byteorder = "little" if header[5] == 1 else "big"
+            if int.from_bytes(header[16:18], byteorder) not in (2, 3):
+                continue
             relative_lib = os.path.relpath(lib_dir, path.parent)
             rpath = "$ORIGIN"
             if relative_lib != ".":
