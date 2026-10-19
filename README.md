@@ -40,7 +40,7 @@ The key thing to note is which patching approach to specify with `relocatable.py
 - `--patch` which rewrites all found paths of the placeholder `--prefix` argument to the target install directory (which defaults to dist/); this is meant to follow the approach used by conda.
 - `--origin` which uses `patchelf` to do a more targeted path rewrite upfront and then to patch any remaining paths; this is meant to follow the approach used by python-build-standalone.
 
-Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a staging `DESTDIR` and moves the installed prefix into place, so the gathered tree contains everything a normal install provides (such as `build-details.json` and the unversioned `python3` links). Only the placeholder prefix is rewritten.
+Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a staging `DESTDIR` and moves the installed prefix into place, so the gathered tree contains everything a normal install provides (such as `build-details.json` and the unversioned `python3` links). Only the placeholder prefix is rewritten, and patched Mach-O files are re-signed ad hoc, since macOS refuses to run binaries whose code signature no longer matches.
 
 ## Project Representatives
 These are people representing projects that have experience with prebuilt binaries for CPython.

@@ -19,6 +19,13 @@ import subprocess
 import tempfile
 
 
+# Thin 32/64-bit Mach-O files in either byte order, and universal binaries.
+MACHO_MAGIC = {
+    bytes.fromhex(magic)
+    for magic in ("feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe")
+}
+
+
 def placeholder_prefix() -> str:
     """Return the placeholder prefix used when building CPython."""
     return "/the/knights/who/say/ni".ljust(255, "i")
@@ -55,6 +62,15 @@ def patch_path(output_dir: pathlib.Path, patch: str) -> None:
             if b"\0" in contents:
                 replacement = target.ljust(len(placeholder), b"\0")
             path.write_bytes(contents.replace(placeholder, replacement))
+            if contents[:4] in MACHO_MAGIC:
+                # Rewriting a Mach-O file invalidates its (ad-hoc) code
+                # signature, and arm64 macOS kills processes that load it.
+                subprocess.run(
+                    ["codesign", "--force", "--sign", "-", path],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
 
 def patch_origin(output_dir: pathlib.Path) -> None:
