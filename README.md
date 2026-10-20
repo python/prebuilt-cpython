@@ -52,6 +52,7 @@ Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a
 - A shared build loads libpython from inside the moved tree, not from the original install
 - No installed file still mentions the old prefix
 - A few stdlib extension modules still work (ones that already fail in the build directory are skipped)
+- Every stdlib extension module that imports in the build directory still imports, from inside the moved tree
 - Those paths are still right when Python is run through a symlink
 - A venv created from it works
 - `build-details.json` and `python-config` give paths inside the moved tree
