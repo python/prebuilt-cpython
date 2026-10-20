@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, TextIO
 
 
 STDLIB_PROBES = {
@@ -29,6 +29,10 @@ STDLIB_PROBES = {
     "ssl": "ssl.create_default_context()",
     "zlib": "assert zlib.decompress(zlib.compress(b'relocatable')) == b'relocatable'",
 }
+
+# ANSI colors for each status in human-readable output.
+STATUS_COLORS = {"PASS": "\033[32m", "FAIL": "\033[31m", "SKIP": "\033[33m"}
+RESET_COLOR = "\033[0m"
 
 # Seconds to wait for each probe.
 TIMEOUT = 30
@@ -482,14 +486,31 @@ class RelocatabilityHarness:
         return "python -m test --fast-ci passed"
 
 
-def render_results(results: list[CheckResult], output_format: str) -> str:
-    """Format the results as text or JSON."""
+def use_color(stream: TextIO) -> bool:
+    """Return whether to color output written to *stream*.
+
+    Follows https://no-color.org and leaves dumb terminals alone.
+    """
+    return (
+        stream.isatty()
+        and not os.environ.get("NO_COLOR")
+        and os.environ.get("TERM") != "dumb"
+    )
+
+
+def render_results(
+    results: list[CheckResult], output_format: str, *, color: bool = False
+) -> str:
+    """Format the results as text or JSON; *color* only affects text."""
     if output_format == "json":
         return json.dumps(list(map(dataclasses.asdict, results)), indent=2)
 
     lines = []
     for result in results:
-        lines.append(f"{result.status:4} {result.name}: {result.summary}")
+        status = f"{result.status:4}"
+        if color:
+            status = f"{STATUS_COLORS[result.status]}{status}{RESET_COLOR}"
+        lines.append(f"{status} {result.name}: {result.summary}")
         lines.extend(f"     {line}" for line in result.details)
     counts = {
         status: sum(result.status == status for result in results)
