@@ -13,13 +13,31 @@ This script is meant to serve two purposes:
 import argparse
 import os
 import pathlib
+import re
 import shutil
 import subprocess
+import tempfile
+
+
+# Thin 32/64-bit Mach-O files in either byte order, and universal binaries.
+MACHO_MAGIC = {
+    bytes.fromhex(magic)
+    for magic in ("feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe")
+}
 
 
 def placeholder_prefix() -> str:
     """Return the placeholder prefix used when building CPython."""
     return "/the/knights/who/say/ni".ljust(255, "i")
+
+
+def configured_prefix(build_dir: pathlib.Path) -> str:
+    """Return the `--prefix` the build directory was configured with."""
+    makefile = build_dir / "Makefile"
+    for line in makefile.read_text(encoding="utf-8").splitlines():
+        if match := re.fullmatch(r"prefix=\s*(\S.*?)\s*", line):
+            return match.group(1)
+    raise ValueError(f"no prefix found in {makefile}")
 
 
 def patch_path(output_dir: pathlib.Path, patch: str) -> None:
@@ -44,6 +62,15 @@ def patch_path(output_dir: pathlib.Path, patch: str) -> None:
             if b"\0" in contents:
                 replacement = target.ljust(len(placeholder), b"\0")
             path.write_bytes(contents.replace(placeholder, replacement))
+            if contents[:4] in MACHO_MAGIC:
+                # Rewriting a Mach-O file invalidates its (ad-hoc) code
+                # signature, and arm64 macOS kills processes that load it.
+                subprocess.run(
+                    ["codesign", "--force", "--sign", "-", path],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
 
 def patch_origin(output_dir: pathlib.Path) -> None:
@@ -55,8 +82,14 @@ def patch_origin(output_dir: pathlib.Path) -> None:
             if path.is_symlink():
                 continue
             with path.open("rb") as file:
-                if file.read(4) != b"\x7fELF":
-                    continue
+                header = file.read(18)
+            if len(header) < 18 or header[:4] != b"\x7fELF":
+                continue
+            # Only executables and shared objects (ET_EXEC and ET_DYN) have an
+            # rpath; patchelf rejects relocatable objects such as python.o.
+            byteorder = "little" if header[5] == 1 else "big"
+            if int.from_bytes(header[16:18], byteorder) not in (2, 3):
+                continue
             relative_lib = os.path.relpath(lib_dir, path.parent)
             rpath = "$ORIGIN"
             if relative_lib != ".":
@@ -98,20 +131,41 @@ def run_gather(
     strategy: str,
     install_dir: pathlib.Path,
 ) -> None:
-    """Gather all the release files together."""
+    """Gather all the release files together.
+
+    The build is installed exactly as configured (into a staging `DESTDIR`)
+    and the resulting prefix is moved to *output_dir*. Only the placeholder
+    prefix from `configure` is rewritten; a build configured with any other
+    prefix keeps it, so the gathered tree is a moved copy of that install.
+    """
     output_dir = output_dir.resolve()
     if output_dir.exists():
         shutil.rmtree(output_dir)
-    subprocess.run(
-        [
-            "make",
-            "-s",
-            "commoninstall",
-            f"prefix={output_dir}",
-        ],
-        cwd=build_dir,
-        check=True,
-    )
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    prefix = configured_prefix(build_dir)
+    with tempfile.TemporaryDirectory(
+        prefix=".gather-", dir=output_dir.parent
+    ) as staging:
+        # The top-level `install` target (unlike `commoninstall`) also
+        # installs build-details.json and the unversioned bininstall links.
+        subprocess.run(
+            ["make", "-s", "install", "ENSUREPIP=no", f"DESTDIR={staging}"],
+            cwd=build_dir,
+            check=True,
+        )
+        (pathlib.Path(staging) / prefix.lstrip("/")).rename(output_dir)
+        leftovers = [
+            os.fspath(root / name)
+            for root, _, filenames in pathlib.Path(staging).walk()
+            for name in filenames
+        ]
+        if leftovers:
+            shutil.rmtree(output_dir)
+            raise ValueError(
+                f"`make install` wrote files outside the prefix {prefix!r} "
+                f"(e.g. a separate --exec-prefix), which cannot be gathered: "
+                f"{leftovers[:5]}"
+            )
     if strategy == "origin":
         # python-build-standalone also patches CPython's source, rewrites
         # scripts and metadata, handles Mach-O, and ships shared libpython.
