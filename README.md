@@ -47,12 +47,12 @@ Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a
 
 `relocatable.py test` checks whether a build still works after it has been moved. It gathers the build into a temporary directory (dist/ is left alone), renames that directory to a path of a different length with spaces in it, and runs these checks without patching anything again:
 
-- the interpreter starts
+- The interpreter starts
 - `sys` and `sysconfig` paths point inside the moved tree
-- no installed file still mentions the old prefix
-- a few stdlib extension modules still work (ones that already fail in the build directory are skipped)
-- those paths are still right when Python is run through a symlink
-- a venv created from it works
+- No installed file still mentions the old prefix
+- A few stdlib extension modules still work (ones that already fail in the build directory are skipped)
+- Those paths are still right when Python is run through a symlink
+- A venv created from it works
 
 Each check prints `PASS`, `FAIL`, or `SKIP`. Some checks fail today. That's expected: they show what CPython still needs to fix.
 

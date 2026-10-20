@@ -31,7 +31,7 @@ STDLIB_PROBES = {
 }
 
 # Seconds to wait for each probe.
-TIMEOUT = 120
+TIMEOUT = 30
 
 STARTUP_PROBE = r"""
 import json
@@ -65,9 +65,6 @@ class CheckResult:
     status: str
     summary: str
     details: list[str] = dataclasses.field(default_factory=list)
-
-    def as_dict(self) -> dict[str, object]:
-        return dataclasses.asdict(self)
 
 
 class CheckFailed(Exception):
@@ -166,6 +163,20 @@ def broken_stdlib_modules(build_dir: pathlib.Path, cwd: pathlib.Path) -> dict[st
 class RelocatabilityHarness:
     """Checks for a CPython install that has already been moved."""
 
+    root: pathlib.Path
+    original_prefix: pathlib.Path
+    # --prefix of a build not configured by relocatable.py, if any.
+    configured_prefix: pathlib.PurePath | None
+    source_dir: pathlib.Path
+    build_dir: pathlib.Path
+    work_dir: pathlib.Path
+    full: bool
+    broken_modules: dict[str, str] | None
+    env: dict[str, str]
+    results: list[CheckResult]
+    python: pathlib.Path | None
+    snapshot: dict[str, Any] | None
+
     def __init__(
         self,
         root: pathlib.Path,
@@ -180,7 +191,6 @@ class RelocatabilityHarness:
     ) -> None:
         self.root = root.resolve()
         self.original_prefix = original_prefix.resolve()
-        # --prefix of a build not configured by relocatable.py, if any.
         self.configured_prefix = configured_prefix
         self.source_dir = source_dir.resolve()
         self.build_dir = build_dir.resolve()
@@ -188,9 +198,9 @@ class RelocatabilityHarness:
         self.full = full
         self.broken_modules = broken_modules
         self.env = sanitized_environment()
-        self.results: list[CheckResult] = []
-        self.python: pathlib.Path | None = None
-        self.snapshot: dict[str, Any] | None = None
+        self.results = []
+        self.python = None
+        self.snapshot = None
 
     def run(self) -> list[CheckResult]:
         """Run all the checks and return their results."""
@@ -475,7 +485,7 @@ class RelocatabilityHarness:
 def render_results(results: list[CheckResult], output_format: str) -> str:
     """Format the results as text or JSON."""
     if output_format == "json":
-        return json.dumps([result.as_dict() for result in results], indent=2)
+        return json.dumps(list(map(dataclasses.asdict, results)), indent=2)
 
     lines = []
     for result in results:
