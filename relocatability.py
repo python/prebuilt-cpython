@@ -18,7 +18,8 @@ from typing import Any
 STDLIB_PROBES = {
     "bz2": "assert bz2.decompress(bz2.compress(b'relocatable')) == b'relocatable'",
     "ctypes": "assert ctypes.pythonapi is not None",
-    "hashlib": "assert hashlib.sha256(b'relocatable').hexdigest()",
+    # Not hashlib, which quietly falls back to the builtin _sha2 module.
+    "_hashlib": "assert _hashlib.openssl_sha256(b'relocatable').hexdigest()",
     "lzma": "assert lzma.decompress(lzma.compress(b'relocatable')) == b'relocatable'",
     "sqlite3": (
         "connection = sqlite3.connect(':memory:'); "
@@ -28,6 +29,32 @@ STDLIB_PROBES = {
     "ssl": "ssl.create_default_context()",
     "zlib": "assert zlib.decompress(zlib.compress(b'relocatable')) == b'relocatable'",
 }
+
+# Seconds to wait for each probe.
+TIMEOUT = 120
+
+STARTUP_PROBE = r"""
+import json
+import os
+import sys
+import sysconfig
+
+keys = (
+    "BINDIR", "BINLIBDEST", "CONFINCLUDEPY", "INCLUDEPY", "LIBDEST",
+    "LIBDIR", "LIBPL", "prefix", "exec_prefix",
+)
+data = {
+    "executable": sys.executable,
+    "prefix": sys.prefix,
+    "exec_prefix": sys.exec_prefix,
+    "base_prefix": sys.base_prefix,
+    "base_exec_prefix": sys.base_exec_prefix,
+    "path": sys.path,
+    "config_paths": sysconfig.get_paths(),
+    "config_vars": {key: sysconfig.get_config_var(key) for key in keys},
+}
+print(json.dumps(data, sort_keys=True))
+"""
 
 
 @dataclasses.dataclass(slots=True)
@@ -82,9 +109,26 @@ def find_interpreter(root: pathlib.Path) -> pathlib.Path:
     return python
 
 
-def available_stdlib_modules(root: pathlib.Path, cwd: pathlib.Path) -> set[str]:
-    """Return the STDLIB_PROBES modules that work before the move."""
-    python = find_interpreter(root)
+def find_build_interpreter(build_dir: pathlib.Path) -> pathlib.Path:
+    """Return the interpreter built in *build_dir*.
+
+    It's python.exe on case-insensitive file systems, such as macOS's default.
+    """
+    for name in ("python", "python.exe"):
+        python = build_dir / name
+        if python.is_file():
+            return python
+    raise CheckFailed("no Python executable found", [os.fspath(build_dir)])
+
+
+def broken_stdlib_modules(build_dir: pathlib.Path, cwd: pathlib.Path) -> dict[str, str]:
+    """Return the STDLIB_PROBES modules that fail in the build directory.
+
+    Running the build directory's interpreter means that anything broken by
+    `make install`, patching, or the move is still reported as a failure.
+    Each module maps to the last line of its error output.
+    """
+    python = find_build_interpreter(build_dir)
     env = sanitized_environment()
     startup = subprocess.run(
         [python, "-I", "-c", "pass"],
@@ -92,21 +136,31 @@ def available_stdlib_modules(root: pathlib.Path, cwd: pathlib.Path) -> set[str]:
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        timeout=TIMEOUT,
     )
     if startup.returncode:
-        raise CheckFailed("the installation did not run before relocation")
-    available = set()
+        raise CheckFailed("the interpreter in the build directory did not run")
+    broken = {}
     for module, probe in STDLIB_PROBES.items():
-        completed = subprocess.run(
-            [python, "-I", "-c", f"import {module}; {probe}"],
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if completed.returncode == 0:
-            available.add(module)
-    return available
+        try:
+            completed = subprocess.run(
+                [python, "-I", "-c", f"import {module}; {probe}"],
+                cwd=cwd,
+                env=env,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            broken[module] = f"timed out after {TIMEOUT}s"
+            continue
+        if completed.returncode:
+            lines = completed.stderr.strip().splitlines() or [
+                f"exit status {completed.returncode}"
+            ]
+            broken[module] = lines[-1]
+    return broken
 
 
 class RelocatabilityHarness:
@@ -121,7 +175,7 @@ class RelocatabilityHarness:
         work_dir: pathlib.Path,
         *,
         full: bool = False,
-        baseline_modules: set[str] | None = None,
+        broken_modules: dict[str, str] | None = None,
         configured_prefix: pathlib.PurePath | None = None,
     ) -> None:
         self.root = root.resolve()
@@ -132,7 +186,7 @@ class RelocatabilityHarness:
         self.build_dir = build_dir.resolve()
         self.work_dir = work_dir.resolve()
         self.full = full
-        self.baseline_modules = baseline_modules
+        self.broken_modules = broken_modules
         self.env = sanitized_environment()
         self.results: list[CheckResult] = []
         self.python: pathlib.Path | None = None
@@ -201,24 +255,30 @@ class RelocatabilityHarness:
         command: list[str | os.PathLike[str]],
         *,
         cwd: pathlib.Path | None = None,
-        timeout: int = 120,
+        timeout: int = TIMEOUT,
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [os.fspath(part) for part in command],
-            cwd=cwd or self.work_dir,
-            env=self.env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
+        args = [os.fspath(part) for part in command]
+        try:
+            return subprocess.run(
+                args,
+                cwd=cwd or self.work_dir,
+                env=self.env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CheckFailed(
+                f"timed out after {timeout}s", [f"command: {shlex.join(args)}"]
+            ) from exc
 
     def _run_python(
         self,
         args: list[str],
         *,
         cwd: pathlib.Path | None = None,
-        timeout: int = 120,
+        timeout: int = TIMEOUT,
     ) -> subprocess.CompletedProcess[str]:
         if self.python is None:
             raise CheckSkipped("the relocated interpreter did not start")
@@ -236,45 +296,20 @@ class RelocatabilityHarness:
                 details.append(f"stderr:\n{completed.stderr.rstrip()}")
             raise CheckFailed(summary, details)
 
-    def _check_startup(self) -> str:
-        self.python = find_interpreter(self.root)
-        probe = r"""
-import json
-import os
-import sys
-import sysconfig
-
-keys = (
-    "BINDIR", "BINLIBDEST", "CONFINCLUDEPY", "INCLUDEPY", "LIBDEST",
-    "LIBDIR", "LIBPL", "prefix", "exec_prefix",
-)
-data = {
-    "executable": sys.executable,
-    "prefix": sys.prefix,
-    "exec_prefix": sys.exec_prefix,
-    "base_prefix": sys.base_prefix,
-    "base_exec_prefix": sys.base_exec_prefix,
-    "path": sys.path,
-    "config_paths": sysconfig.get_paths(),
-    "config_vars": {key: sysconfig.get_config_var(key) for key in keys},
-}
-print(json.dumps(data, sort_keys=True))
-"""
-        completed = self._run_python(["-I", "-c", probe])
+    def _snapshot(self, python: pathlib.Path) -> dict[str, Any]:
+        """Run STARTUP_PROBE with *python* and return its output."""
+        completed = self._run([python, "-I", "-c", STARTUP_PROBE])
         self._require_success(completed, "the relocated interpreter did not start")
         try:
-            self.snapshot = json.loads(completed.stdout.strip().splitlines()[-1])
+            return json.loads(completed.stdout.strip().splitlines()[-1])
         except (IndexError, json.JSONDecodeError) as exc:
             raise CheckFailed(
                 "the startup probe did not produce valid JSON",
                 [completed.stdout.rstrip(), completed.stderr.rstrip()],
             ) from exc
-        return os.fspath(self.python)
 
-    def _check_runtime_paths(self) -> str:
-        if self.snapshot is None:
-            raise CheckSkipped("the startup probe did not complete")
-
+    def _path_failures(self, snapshot: dict[str, Any]) -> list[str]:
+        """Return the paths in *snapshot* that are outside the moved tree."""
         failures: list[str] = []
         scalar_names = (
             "executable",
@@ -284,24 +319,36 @@ print(json.dumps(data, sort_keys=True))
             "base_exec_prefix",
         )
         for name in scalar_names:
-            value = self.snapshot.get(name)
+            if name not in snapshot:
+                continue
+            value = snapshot[name]
             if not isinstance(value, str) or not path_is_within(value, self.root):
                 failures.append(f"{name}={value!r}")
 
-        for name, value in self.snapshot["config_paths"].items():
+        for name, value in snapshot["config_paths"].items():
             if isinstance(value, str) and os.path.isabs(value):
                 if not path_is_within(value, self.root):
                     failures.append(f"sysconfig path {name}={value!r}")
 
-        for name, value in self.snapshot["config_vars"].items():
+        for name, value in snapshot["config_vars"].items():
             if isinstance(value, str) and os.path.isabs(value):
                 if not path_is_within(value, self.root):
                     failures.append(f"sysconfig variable {name}={value!r}")
 
-        for value in self.snapshot["path"]:
+        for value in snapshot["path"]:
             if value and os.path.isabs(value) and not path_is_within(value, self.root):
                 failures.append(f"sys.path entry {value!r}")
+        return failures
 
+    def _check_startup(self) -> str:
+        self.python = find_interpreter(self.root)
+        self.snapshot = self._snapshot(self.python)
+        return os.fspath(self.python)
+
+    def _check_runtime_paths(self) -> str:
+        if self.snapshot is None:
+            raise CheckSkipped("the startup probe did not complete")
+        failures = self._path_failures(self.snapshot)
         if failures:
             raise CheckFailed(
                 f"{len(failures)} runtime path(s) escape the relocated tree",
@@ -363,26 +410,34 @@ print(json.dumps(data, sort_keys=True))
         return f"scanned {files_checked} installed files"
 
     def _check_stdlib(self, module: str) -> str:
-        if self.baseline_modules is not None and module not in self.baseline_modules:
-            raise CheckSkipped("module was not available before relocation")
+        if self.broken_modules is not None and module in self.broken_modules:
+            raise CheckSkipped(
+                f"already fails in the build directory: {self.broken_modules[module]}"
+            )
         probe = f"import {module}; {STDLIB_PROBES[module]}"
         completed = self._run_python(["-I", "-c", probe])
         self._require_success(completed, f"{module} failed after relocation")
         return f"{module} works after relocation"
 
     def _check_symlink(self) -> str:
-        if self.python is None:
-            raise CheckSkipped("the relocated interpreter did not start")
+        if self.snapshot is None:
+            raise CheckSkipped("the startup probe did not complete")
         link = self.work_dir / "python-through-symlink"
         link.unlink(missing_ok=True)
         link.symlink_to(self.python)
-        completed = self._run([link, "-I", "-c", "print(42)"])
-        self._require_success(
-            completed, "the relocated interpreter failed through a symlink"
-        )
-        if completed.stdout.strip() != "42":
-            raise CheckFailed("the symlink invocation returned unexpected output")
-        return "the interpreter works through an external symlink"
+        snapshot = self._snapshot(link)
+        # sys.executable is the symlink itself, which is outside the tree.
+        del snapshot["executable"]
+        # runtime.paths already reports paths that are wrong either way.
+        known = set(self._path_failures(self.snapshot))
+        failures = [f for f in self._path_failures(snapshot) if f not in known]
+        if failures:
+            raise CheckFailed(
+                f"{len(failures)} path(s) escape the relocated tree "
+                "only when run through a symlink",
+                failures,
+            )
+        return "paths resolve inside the relocated tree when run through a symlink"
 
     def _check_venv(self) -> str:
         venv = self.work_dir / "relocated-venv"

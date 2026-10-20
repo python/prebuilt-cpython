@@ -24,7 +24,7 @@ from relocatability import (
     CheckFailed,
     CheckResult,
     RelocatabilityHarness,
-    available_stdlib_modules,
+    broken_stdlib_modules,
     render_results,
     run_in_temporary_directory,
 )
@@ -205,6 +205,11 @@ def run_test(
         unrelated_cwd.mkdir()
 
         try:
+            broken_modules = broken_stdlib_modules(build_dir, unrelated_cwd)
+        except (CheckFailed, OSError, subprocess.TimeoutExpired):
+            broken_modules = None
+
+        try:
             prefix = configured_prefix(build_dir)
             run_gather(
                 source_dir,
@@ -214,12 +219,6 @@ def run_test(
                 original_prefix,
                 sys.stderr if output_format == "json" else None,
             )
-            try:
-                baseline_modules = available_stdlib_modules(
-                    original_prefix, unrelated_cwd
-                )
-            except (CheckFailed, OSError):
-                baseline_modules = None
             original_prefix.rename(relocated_prefix)
         except (OSError, ValueError, subprocess.CalledProcessError) as exc:
             return [
@@ -262,7 +261,7 @@ def run_test(
                 build_dir,
                 unrelated_cwd,
                 full=full,
-                baseline_modules=baseline_modules,
+                broken_modules=broken_modules,
                 configured_prefix=stale_prefix,
             ).run()
         )

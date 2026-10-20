@@ -50,8 +50,8 @@ Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a
 - the interpreter starts
 - `sys` and `sysconfig` paths point inside the moved tree
 - no installed file still mentions the old prefix
-- a few stdlib extension modules still work (ones that were already broken before the move are skipped)
-- the interpreter works through a symlink
+- a few stdlib extension modules still work (ones that already fail in the build directory are skipped)
+- those paths are still right when Python is run through a symlink
 - a venv created from it works
 
 Each check prints `PASS`, `FAIL`, or `SKIP`. Some checks fail today. That's expected: they show what CPython still needs to fix.
