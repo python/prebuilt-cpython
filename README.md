@@ -76,6 +76,8 @@ Each check prints `PASS`, `FAIL`, or `SKIP` (in color on a terminal, unless `NO_
 
 Use `--strategy origin` to gather with `--origin` (the default is `--patch`), `--full` to also run `python -m test --fast-ci`, `--work-dir DIR` to keep the temporary files (including `gather.log`, the `make install` output), and `--format json` for JSON output.
 
+The Relocatability GitHub Actions workflow runs `test` with both strategies against CPython `main` on Linux and macOS, daily and for each pull request. Each run's summary lists the results, and the JSON is attached to the run.
+
 If the build wasn't configured by `relocatable.py configure`, its `--prefix` is left alone and treated as the old location. If that directory still exists, the `distribution.isolation` check fails, because the moved build might be using files from it without anyone noticing.
 
 ## Project Representatives
