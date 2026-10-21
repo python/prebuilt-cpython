@@ -25,12 +25,13 @@ The relocatable.py script in this repo is meant to serve two purposes:
 1. To test different approaches to building CPython into a relocatable build.
 2. Figure out where upstream changes need to be made so a relocatable can be successful.
 
-It's broken up into three subcommands to configure, make, and gather the files for a relocatable build. Assuming you run the script from within a source checkout of CPython, your typical command sequence will be:
+It's broken up into subcommands to configure, make, gather, and test a relocatable build. Assuming you run the script from within a source checkout of CPython, your typical command sequence will be:
 
 ```shell
 ../prebuilt-cpython/relocatable.py configure
 ../prebuilt-cpython/relocatable.py make
 ../prebuilt-cpython/relocatable.py gather <patching approach>
+../prebuilt-cpython/relocatable.py test
 ```
 
 The defaults will result in builddir/ containing the build and dist/ containing the files that comprise a relocatable build.
@@ -41,6 +42,27 @@ The key thing to note is which patching approach to specify with `relocatable.py
 - `--origin` which uses `patchelf` to do a more targeted path rewrite upfront and then to patch any remaining paths; this is meant to follow the approach used by python-build-standalone.
 
 Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a staging `DESTDIR` and moves the installed prefix into place, so the gathered tree contains everything a normal install provides (such as `build-details.json` and the unversioned `python3` links). Only the placeholder prefix is rewritten, and patched Mach-O files are re-signed ad hoc, since macOS refuses to run binaries whose code signature no longer matches.
+
+### Testing a relocated build
+
+`relocatable.py test` checks whether a build still works after it has been moved. It gathers the build into a temporary directory (dist/ is left alone), renames that directory to a path of a different length with spaces in it, and runs these checks without patching anything again:
+
+- The interpreter starts
+- `sys` and `sysconfig` paths point inside the moved tree
+- No installed file still mentions the old prefix
+- A few stdlib extension modules still work (ones that already fail in the build directory are skipped)
+- Those paths are still right when Python is run through a symlink
+- A venv created from it works
+
+Each check prints `PASS`, `FAIL`, or `SKIP`. Some checks fail today. That's expected: they show what CPython still needs to fix.
+
+```shell
+../prebuilt-cpython/relocatable.py test
+```
+
+Use `--strategy origin` to gather with `--origin` (the default is `--patch`), `--full` to also run `python -m test --fast-ci`, `--work-dir DIR` to keep the temporary files, and `--format json` for JSON output.
+
+If the build wasn't configured by `relocatable.py configure`, its `--prefix` is left alone and treated as the old location. If that directory still exists, the `distribution.isolation` check fails, because the moved build might be using files from it without anyone noticing.
 
 ## Project Representatives
 These are people representing projects that have experience with prebuilt binaries for CPython.

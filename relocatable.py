@@ -16,7 +16,18 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+from typing import TextIO
+
+from relocatability import (
+    CheckFailed,
+    CheckResult,
+    RelocatabilityHarness,
+    broken_stdlib_modules,
+    render_results,
+    run_in_temporary_directory,
+)
 
 
 # Thin 32/64-bit Mach-O files in either byte order, and universal binaries.
@@ -130,6 +141,7 @@ def run_gather(
     output_dir: pathlib.Path,
     strategy: str,
     install_dir: pathlib.Path,
+    log_file: TextIO | None = None,
 ) -> None:
     """Gather all the release files together.
 
@@ -152,6 +164,8 @@ def run_gather(
             ["make", "-s", "install", "ENSUREPIP=no", f"DESTDIR={staging}"],
             cwd=build_dir,
             check=True,
+            stdout=log_file,
+            stderr=log_file,
         )
         (pathlib.Path(staging) / prefix.lstrip("/")).rename(output_dir)
         leftovers = [
@@ -172,6 +186,92 @@ def run_gather(
         # Those are intentionally excluded from this post-build ELF experiment.
         patch_origin(output_dir)
     patch_path(output_dir, os.fspath(install_dir))
+
+
+def run_test(
+    source_dir: pathlib.Path,
+    build_dir: pathlib.Path,
+    strategy: str,
+    work_dir: pathlib.Path | None,
+    output_format: str,
+    full: bool,
+) -> int:
+    """Gather a build, move it, and check that it still works."""
+
+    def run(workspace: pathlib.Path) -> list[CheckResult]:
+        original_prefix = workspace / "original-prefix"
+        relocated_prefix = workspace / "relocated prefix with spaces"
+        unrelated_cwd = workspace / "unrelated-working-directory"
+        unrelated_cwd.mkdir()
+
+        try:
+            broken_modules = broken_stdlib_modules(build_dir, unrelated_cwd)
+        except (CheckFailed, OSError, subprocess.TimeoutExpired):
+            broken_modules = None
+
+        try:
+            prefix = configured_prefix(build_dir)
+            run_gather(
+                source_dir,
+                build_dir,
+                original_prefix,
+                strategy,
+                original_prefix,
+                sys.stderr if output_format == "json" else None,
+            )
+            original_prefix.rename(relocated_prefix)
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            return [
+                CheckResult(
+                    "distribution.gather",
+                    "FAIL",
+                    f"could not prepare the relocated installation: {exc}",
+                )
+            ]
+
+        if prefix == placeholder_prefix():
+            stale_prefix = None
+            summary = "gathered the installation and moved it without repatching"
+        else:
+            # A build we didn't configure keeps its --prefix, so that's the
+            # old location to look for.
+            stale_prefix = pathlib.PurePosixPath(prefix)
+            summary = (
+                f"installed the build configured for {prefix} "
+                "and moved it without patching"
+            )
+        results = [CheckResult("distribution.move", "PASS", summary)]
+        if stale_prefix is not None and os.path.lexists(stale_prefix):
+            # The moved build could load libpython or the stdlib from the
+            # old prefix and every other check would still pass.
+            results.append(
+                CheckResult(
+                    "distribution.isolation",
+                    "FAIL",
+                    "the configured prefix still exists, so passing runtime "
+                    "checks may be using it rather than the relocated tree",
+                    [f"rename or remove {prefix} and rerun"],
+                )
+            )
+        results.extend(
+            RelocatabilityHarness(
+                relocated_prefix,
+                original_prefix,
+                source_dir,
+                build_dir,
+                unrelated_cwd,
+                full=full,
+                broken_modules=broken_modules,
+                configured_prefix=stale_prefix,
+            ).run()
+        )
+        return results
+
+    results, preserved_path = run_in_temporary_directory(run, work_dir)
+    print(render_results(results, output_format))
+    if preserved_path is not None:
+        print(f"Artifacts preserved in {preserved_path}", file=sys.stderr)
+    return int(any(result.status == "FAIL" for result in results))
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
@@ -218,6 +318,34 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
             "relative paths resolve from the current directory"
         ),
     )
+    test_parser = subparsers.add_parser(
+        "test",
+        parents=[common_parser],
+        help="Gather a build, move it, and check that it still works",
+    )
+    test_parser.add_argument(
+        "--strategy",
+        choices=("patch", "origin"),
+        default="patch",
+        help="gather strategy (default: patch)",
+    )
+    test_parser.add_argument(
+        "--work-dir",
+        type=pathlib.Path,
+        help="keep the temporary files under this directory",
+    )
+    test_parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("human", "json"),
+        default="human",
+        help="output format (default: human)",
+    )
+    test_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="also run `python -m test --fast-ci` from the relocated tree",
+    )
     patch_group.add_argument(
         "--origin",
         nargs="?",
@@ -248,13 +376,15 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     return namespace
 
 
-def main(args: list[str] | None = None) -> None:
+def main(args: list[str] | None = None) -> int:
     namespace = parse_args(args)
     match namespace.command:
         case "configure":
             run_configure(namespace.source_dir, namespace.build_dir)
+            return 0
         case "make":
             run_make(namespace.source_dir, namespace.build_dir)
+            return 0
         case "gather":
             run_gather(
                 namespace.source_dir,
@@ -263,9 +393,19 @@ def main(args: list[str] | None = None) -> None:
                 namespace.patch_strategy,
                 namespace.install_dir,
             )
+            return 0
+        case "test":
+            return run_test(
+                namespace.source_dir,
+                namespace.build_dir,
+                namespace.strategy,
+                namespace.work_dir,
+                namespace.output_format,
+                namespace.full,
+            )
         case command:
             raise ValueError(f"Unknown command: {command}")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
