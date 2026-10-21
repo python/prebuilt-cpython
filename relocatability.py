@@ -6,6 +6,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -93,6 +94,21 @@ def sanitized_environment() -> dict[str, str]:
     }
 
 
+def build_environment(build_dir: pathlib.Path) -> dict[str, str]:
+    """Return sanitized_environment() plus what *build_dir*'s interpreter needs.
+
+    An --enable-shared build finds libpython in the build directory through
+    the Makefile's RUNSHARED (for example, LD_LIBRARY_PATH=<build dir>).
+    """
+    env = sanitized_environment()
+    makefile = build_dir / "Makefile"
+    for line in makefile.read_text(encoding="utf-8").splitlines():
+        if match := re.fullmatch(r"RUNSHARED=\s*(\w+)=(.+?)\s*", line):
+            env[match.group(1)] = match.group(2)
+            break
+    return env
+
+
 def path_is_within(path: os.PathLike[str] | str, root: pathlib.Path) -> bool:
     """Return whether *path* resolves inside *root*."""
     try:
@@ -130,7 +146,7 @@ def broken_stdlib_modules(build_dir: pathlib.Path, cwd: pathlib.Path) -> dict[st
     Each module maps to the last line of its error output.
     """
     python = find_build_interpreter(build_dir)
-    env = sanitized_environment()
+    env = build_environment(build_dir)
     startup = subprocess.run(
         [python, "-I", "-c", "pass"],
         cwd=cwd,
