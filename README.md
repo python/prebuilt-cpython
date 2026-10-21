@@ -54,7 +54,7 @@ Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a
 - Those paths are still right when Python is run through a symlink
 - A venv created from it works
 
-Each check prints `PASS`, `FAIL`, or `SKIP`. Some checks fail today. That's expected: they show what CPython still needs to fix.
+Each check prints `PASS`, `FAIL`, or `SKIP` (in color on a terminal, unless `NO_COLOR` is set). Some checks fail today. That's expected: they show what CPython still needs to fix.
 
 ```shell
 ../prebuilt-cpython/relocatable.py test

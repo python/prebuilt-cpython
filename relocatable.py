@@ -26,6 +26,7 @@ from relocatability import (
     RelocatabilityHarness,
     broken_stdlib_modules,
     render_results,
+    use_color,
     run_in_temporary_directory,
 )
 
@@ -268,7 +269,7 @@ def run_test(
         return results
 
     results, preserved_path = run_in_temporary_directory(run, work_dir)
-    print(render_results(results, output_format))
+    print(render_results(results, output_format, color=use_color(sys.stdout)))
     if preserved_path is not None:
         print(f"Artifacts preserved in {preserved_path}", file=sys.stderr)
     return int(any(result.status == "FAIL" for result in results))
