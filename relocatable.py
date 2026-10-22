@@ -11,13 +11,17 @@ This script is meant to serve two purposes:
 # ///
 
 import argparse
+import dataclasses
+import hashlib
 import os
 import pathlib
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import urllib.request
 from typing import TextIO
 
 from relocatability import (
@@ -36,6 +40,106 @@ MACHO_MAGIC = {
     bytes.fromhex(magic)
     for magic in ("feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe")
 }
+
+
+@dataclasses.dataclass(frozen=True)
+class Dependency:
+    """A third-party library that a stdlib extension module needs."""
+
+    name: str
+    version: str
+    url: str
+    sha256: str
+    # Commands run in the unpacked source directory. "{prefix}" and "{jobs}"
+    # are replaced with the install directory and the number of make jobs.
+    commands: tuple[tuple[str, ...], ...]
+
+    @property
+    def basename(self) -> str:
+        return f"{self.name}-{self.version}"
+
+
+# Libraries for the extension modules that macOS doesn't provide (_ssl,
+# _hashlib, _lzma, _zstd and _decimal). Only static libraries are installed,
+# so the extension modules don't link against anything outside the
+# installation.
+# The OpenSSL, XZ and mpdecimal versions and checksums match
+# Mac/BuildScript/build-installer.py; the zstd version matches
+# Platforms/Apple, and its checksum is the one published with the release.
+DEPENDENCIES = (
+    Dependency(
+        "openssl",
+        "3.5.9",
+        "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
+        "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+        (
+            (
+                "./Configure",
+                "no-shared",
+                "no-tests",
+                "-fPIC",
+                "--prefix={prefix}",
+                "--libdir=lib",
+                "--openssldir={prefix}/ssl",
+            ),
+            ("make", "-j{jobs}"),
+            ("make", "install_sw"),
+        ),
+    ),
+    Dependency(
+        "xz",
+        "5.2.3",
+        "https://tukaani.org/xz/xz-5.2.3.tar.gz",
+        "71928b357d0a09a12a4b4c5fafca8c31c19b0e7d3b8ebb19622e96f26dbf28cb",
+        (
+            (
+                "./configure",
+                "--prefix={prefix}",
+                "--disable-shared",
+                "--with-pic",
+                "--disable-dependency-tracking",
+                "--disable-xz",
+                "--disable-xzdec",
+                "--disable-lzmadec",
+                "--disable-lzmainfo",
+                "--disable-lzma-links",
+                "--disable-scripts",
+                "--disable-doc",
+            ),
+            ("make", "-j{jobs}"),
+            ("make", "install"),
+        ),
+    ),
+    Dependency(
+        "zstd",
+        "1.5.7",
+        "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz",
+        "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3",
+        (
+            (
+                "make",
+                "-C",
+                "lib",
+                "-j{jobs}",
+                "install-static",
+                "install-includes",
+                "install-pc",
+                "PREFIX={prefix}",
+            ),
+        ),
+    ),
+    Dependency(
+        "mpdecimal",
+        "4.0.1",
+        "https://www.bytereef.org/software/mpdecimal/releases/mpdecimal-4.0.1.tar.gz",
+        "96d33abb4bb0070c7be0fed4246cd38416188325f820468214471938545b1ac8",
+        (
+            ("./configure", "--prefix={prefix}", "--disable-cxx"),
+            ("make", "-j{jobs}"),
+            ("make", "install"),
+        ),
+    ),
+)
 
 
 def placeholder_prefix() -> str:
@@ -112,19 +216,88 @@ def patch_origin(output_dir: pathlib.Path) -> None:
             )
 
 
-def run_configure(source_dir: pathlib.Path, build_dir: pathlib.Path) -> None:
+def download(url: str, sha256: str, downloads_dir: pathlib.Path) -> pathlib.Path:
+    """Download *url* into *downloads_dir* unless it's already there."""
+    path = downloads_dir / url.rpartition("/")[2]
+    if not path.exists():
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(path.name + ".partial")
+        with (
+            urllib.request.urlopen(url, timeout=60) as response,
+            partial.open("wb") as file,
+        ):
+            shutil.copyfileobj(response, file)
+        partial.rename(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != sha256:
+        raise ValueError(f"{path} has SHA-256 {digest}, expected {sha256}")
+    return path
+
+
+def prepend_flags(flags: str, variable: str) -> str:
+    """Put *flags* before the value of the environment *variable*."""
+    return " ".join(filter(None, [flags, os.environ.get(variable, "").strip()]))
+
+
+def run_deps(deps_dir: pathlib.Path) -> None:
+    """Build the third-party libraries in DEPENDENCIES into *deps_dir*."""
+    deps_dir = deps_dir.resolve()
+    install_dir = deps_dir / "install"
+    jobs = os.process_cpu_count() or 1
+    env = os.environ | {"CFLAGS": prepend_flags("-O2 -fPIC", "CFLAGS")}
+    for dependency in DEPENDENCIES:
+        stamp = install_dir / f".{dependency.basename}.built"
+        if stamp.exists():
+            continue
+        archive = download(dependency.url, dependency.sha256, deps_dir / "downloads")
+        source_dir = deps_dir / "src" / dependency.basename
+        if source_dir.exists():
+            shutil.rmtree(source_dir)
+        with tarfile.open(archive) as tar:
+            tar.extractall(source_dir.parent, filter="data")
+        for command in dependency.commands:
+            subprocess.run(
+                [arg.format(prefix=install_dir, jobs=jobs) for arg in command],
+                cwd=source_dir,
+                env=env,
+                check=True,
+            )
+        stamp.touch()
+    # Some of the builds can't skip their shared libraries. Remove them so
+    # CPython links the static ones.
+    for path in (install_dir / "lib").iterdir():
+        if path.name.endswith(".dylib") or ".so" in path.suffixes:
+            path.unlink()
+
+
+def run_configure(
+    source_dir: pathlib.Path,
+    build_dir: pathlib.Path,
+    deps_dir: pathlib.Path | None = None,
+) -> None:
     """Run `configure` in the build directory."""
     configure = source_dir.resolve() / "configure"
     build_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            configure,
-            f"--prefix={placeholder_prefix()}",
-            "--without-static-libpython",
-        ],
-        cwd=build_dir,
-        check=True,
-    )
+    args = [
+        configure,
+        f"--prefix={placeholder_prefix()}",
+        "--without-static-libpython",
+    ]
+    env = None
+    if deps_dir is not None:
+        install_dir = deps_dir.resolve() / "install"
+        # --with-openssl is needed without pkg-config; the other libraries are
+        # found through the compiler and linker search paths.
+        args += [
+            f"--with-openssl={install_dir}",
+            "CPPFLAGS=" + prepend_flags(f"-I{install_dir}/include", "CPPFLAGS"),
+            "LDFLAGS=" + prepend_flags(f"-L{install_dir}/lib", "LDFLAGS"),
+        ]
+        pkg_config_dirs = [os.fspath(install_dir / "lib" / "pkgconfig")]
+        if pkg_config_path := os.environ.get("PKG_CONFIG_PATH"):
+            pkg_config_dirs.append(pkg_config_path)
+        env = os.environ | {"PKG_CONFIG_PATH": os.pathsep.join(pkg_config_dirs)}
+    subprocess.run(args, cwd=build_dir, env=env, check=True)
 
 
 def run_make(source_dir: pathlib.Path, build_dir: pathlib.Path) -> None:
@@ -303,7 +476,24 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="build directory (default: SOURCE_DIR/builddir)",
     )
 
-    subparsers.add_parser("configure", parents=[common_parser], help="Run `configure`")
+    deps_parser = subparsers.add_parser(
+        "deps",
+        parents=[common_parser],
+        help="Build third-party libraries for stdlib extension modules",
+    )
+    deps_parser.add_argument(
+        "--deps-dir",
+        type=pathlib.Path,
+        help="where to build and install them (default: SOURCE_DIR/deps)",
+    )
+    configure_parser = subparsers.add_parser(
+        "configure", parents=[common_parser], help="Run `configure`"
+    )
+    configure_parser.add_argument(
+        "--deps-dir",
+        type=pathlib.Path,
+        help="use the libraries built by the `deps` subcommand in this directory",
+    )
     subparsers.add_parser("make", parents=[common_parser], help="Run `make`")
     gather_parser = subparsers.add_parser(
         "gather",
@@ -372,6 +562,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     namespace = parser.parse_args(args)
     if namespace.build_dir is None:
         namespace.build_dir = namespace.source_dir / "builddir"
+    if namespace.command == "deps" and namespace.deps_dir is None:
+        namespace.deps_dir = namespace.source_dir / "deps"
     if namespace.command == "gather" and namespace.output_dir is None:
         namespace.output_dir = namespace.source_dir / "dist"
     if namespace.command == "gather":
@@ -390,8 +582,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
 def main(args: list[str] | None = None) -> int:
     namespace = parse_args(args)
     match namespace.command:
+        case "deps":
+            run_deps(namespace.deps_dir)
+            return 0
         case "configure":
-            run_configure(namespace.source_dir, namespace.build_dir)
+            run_configure(namespace.source_dir, namespace.build_dir, namespace.deps_dir)
             return 0
         case "make":
             run_make(namespace.source_dir, namespace.build_dir)
