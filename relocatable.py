@@ -81,6 +81,20 @@ def patch_path(output_dir: pathlib.Path, patch: str) -> None:
                 )
             else:
                 patched = contents.replace(placeholder, target)
+                # shortcut: generated CPython launchers only, extend for other scripts.
+                if match := re.match(
+                    b"#!" + re.escape(placeholder) + rb"(/bin/python[0-9.]*[td]*)\n",
+                    contents,
+                ):
+                    # CPython's launchers need both shell and Python quoting.
+                    executable = target + match[1]
+                    quoted = executable.replace(b"'", b"'\"'\"'").replace(
+                        b"\\", b"'\"\\\\\"'"
+                    )
+                    patched = (
+                        b"#!/bin/sh\n'exec' '" + quoted + b"' \"$0\" \"$@\"\n"
+                        + patched.partition(b"\n")[2]
+                    )
             path.write_bytes(patched)
             if contents[:4] in MACHO_MAGIC:
                 # Rewriting a Mach-O file invalidates its (ad-hoc) code
