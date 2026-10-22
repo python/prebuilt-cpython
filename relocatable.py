@@ -210,23 +210,33 @@ def run_test(
         except (CheckFailed, OSError, subprocess.TimeoutExpired):
             broken_modules = None
 
+        # `make install` prints thousands of lines, which would bury the results.
+        gather_log = workspace / "gather.log"
         try:
             prefix = configured_prefix(build_dir)
-            run_gather(
-                source_dir,
-                build_dir,
-                original_prefix,
-                strategy,
-                original_prefix,
-                sys.stderr if output_format == "json" else None,
-            )
+            with gather_log.open("w", encoding="utf-8") as log_file:
+                run_gather(
+                    source_dir,
+                    build_dir,
+                    original_prefix,
+                    strategy,
+                    original_prefix,
+                    log_file,
+                )
             original_prefix.rename(relocated_prefix)
         except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            details = []
+            if gather_log.exists():
+                lines = gather_log.read_text(errors="replace").splitlines()
+                if lines:
+                    tail = "\n".join(lines[-20:])
+                    details.append(f"end of `make install` output:\n{tail}")
             return [
                 CheckResult(
                     "distribution.gather",
                     "FAIL",
                     f"could not prepare the relocated installation: {exc}",
+                    details,
                 )
             ]
 
