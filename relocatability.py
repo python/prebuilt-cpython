@@ -579,7 +579,9 @@ class RelocatabilityHarness:
                     leaking.add(candidate)
                     continue
                 needles = binary_needles if b"\0" in contents[:8192] else text_needles
-                found = [label for needle, label in needles.items() if needle in contents]
+                found = [
+                    label for needle, label in needles.items() if needle in contents
+                ]
                 if found == ["configured prefix"] and self._is_verbatim_source_copy(
                     candidate
                 ):
@@ -609,9 +611,8 @@ class RelocatabilityHarness:
                 failures.append(f"{path}: {exc}")
                 continue
             failures.extend(
-                f"{path}: {problem}" for problem in build_details_problems(
-                    data, path.parent, self.root
-                )
+                f"{path}: {problem}"
+                for problem in build_details_problems(data, path.parent, self.root)
             )
         if failures:
             raise CheckFailed(
@@ -889,9 +890,7 @@ PyInit_reloc_probe(void)
                     continue
                 failures.append(f"{path}: loader metadata references {value}")
         if failures:
-            raise CheckFailed(
-                "loader metadata contains stale paths", failures[:50]
-            )
+            raise CheckFailed("loader metadata contains stale paths", failures[:50])
         if not inspected:
             raise CheckSkipped("no binaries could be inspected")
         interpreter = self.python.resolve() if self.python is not None else None
