@@ -66,6 +66,33 @@ if not dladdr(address, ctypes.byref(info)) or not info.dli_fname:
 print(json.dumps({"path": os.path.realpath(os.fsdecode(info.dli_fname))}))
 """
 
+# Imports every stdlib extension module and reports where each was loaded
+# from.
+EXTENSIONS_PROBE = r"""
+import importlib
+import importlib.machinery
+import importlib.util
+import json
+import sys
+
+results = {}
+for name in sorted(sys.stdlib_module_names):
+    try:
+        spec = importlib.util.find_spec(name)
+    except Exception:
+        continue
+    origin = getattr(spec, "origin", None) or ""
+    if not origin.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)):
+        continue
+    try:
+        module = importlib.import_module(name)
+    except Exception as exc:
+        results[name] = {"error": f"{type(exc).__name__}: {exc}"}
+    else:
+        results[name] = {"file": module.__file__}
+print(json.dumps(results, sort_keys=True))
+"""
+
 # Seconds to wait for each probe.
 TIMEOUT = 30
 
@@ -338,6 +365,7 @@ class RelocatabilityHarness:
                 f"stdlib.{module}",
                 lambda module=module: self._check_stdlib(module),
             )
+        self._check("stdlib.extensions", self._check_extensions)
         self._check("runtime.symlink", self._check_symlink)
         self._check("runtime.venv", self._check_venv)
         self._check("developer.c-extension", self._check_c_extension)
@@ -393,6 +421,7 @@ class RelocatabilityHarness:
         command: list[str | os.PathLike[str]],
         *,
         cwd: pathlib.Path | None = None,
+        env: dict[str, str] | None = None,
         timeout: int = TIMEOUT,
     ) -> subprocess.CompletedProcess[str]:
         args = [os.fspath(part) for part in command]
@@ -400,7 +429,7 @@ class RelocatabilityHarness:
             return subprocess.run(
                 args,
                 cwd=cwd or self.work_dir,
-                env=self.env,
+                env=env or self.env,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -550,7 +579,9 @@ class RelocatabilityHarness:
                     leaking.add(candidate)
                     continue
                 needles = binary_needles if b"\0" in contents[:8192] else text_needles
-                found = [label for needle, label in needles.items() if needle in contents]
+                found = [
+                    label for needle, label in needles.items() if needle in contents
+                ]
                 if found == ["configured prefix"] and self._is_verbatim_source_copy(
                     candidate
                 ):
@@ -580,9 +611,8 @@ class RelocatabilityHarness:
                 failures.append(f"{path}: {exc}")
                 continue
             failures.extend(
-                f"{path}: {problem}" for problem in build_details_problems(
-                    data, path.parent, self.root
-                )
+                f"{path}: {problem}"
+                for problem in build_details_problems(data, path.parent, self.root)
             )
         if failures:
             raise CheckFailed(
@@ -649,6 +679,48 @@ class RelocatabilityHarness:
         completed = self._run_python(["-I", "-c", probe])
         self._require_success(completed, f"{module} failed after relocation")
         return f"{module} works after relocation"
+
+    def _extension_modules(
+        self, python: pathlib.Path, env: dict[str, str] | None = None
+    ) -> dict[str, dict[str, str]]:
+        """Run EXTENSIONS_PROBE with *python* and return its output."""
+        completed = self._run([python, "-I", "-c", EXTENSIONS_PROBE], env=env)
+        self._require_success(completed, "the extension module probe failed")
+        try:
+            return json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise CheckFailed(
+                "the extension module probe did not produce valid JSON",
+                [completed.stdout.rstrip(), completed.stderr.rstrip()],
+            ) from exc
+
+    def _check_extensions(self) -> str:
+        if self.python is None:
+            raise CheckSkipped("the relocated interpreter did not start")
+        before = self._extension_modules(
+            find_build_interpreter(self.build_dir), build_environment(self.build_dir)
+        )
+        after = self._extension_modules(self.python)
+        working = sorted(name for name, result in before.items() if "file" in result)
+        failures = []
+        for name in working:
+            result = after.get(name)
+            if result is None:
+                failures.append(f"{name}: not found after the move")
+            elif "error" in result:
+                failures.append(f"{name}: {result['error']}")
+            elif not path_is_within(result["file"], self.root):
+                failures.append(f"{name}: loaded from {result['file']}")
+        if failures:
+            raise CheckFailed(
+                f"{len(failures)} of {len(working)} extension module(s) "
+                "failed after the move",
+                failures,
+            )
+        summary = f"{len(working)} extension modules load from the relocated tree"
+        if broken := len(before) - len(working):
+            summary += f" ({broken} already fail in the build directory)"
+        return summary
 
     def _check_symlink(self) -> str:
         if self.snapshot is None:
@@ -818,9 +890,7 @@ PyInit_reloc_probe(void)
                     continue
                 failures.append(f"{path}: loader metadata references {value}")
         if failures:
-            raise CheckFailed(
-                "loader metadata contains stale paths", failures[:50]
-            )
+            raise CheckFailed("loader metadata contains stale paths", failures[:50])
         if not inspected:
             raise CheckSkipped("no binaries could be inspected")
         interpreter = self.python.resolve() if self.python is not None else None
