@@ -49,6 +49,7 @@ Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a
 
 - The interpreter starts
 - `sys` and `sysconfig` paths point inside the moved tree
+- A shared build loads libpython from inside the moved tree, not from the original install
 - No installed file still mentions the old prefix
 - A few stdlib extension modules still work (ones that already fail in the build directory are skipped)
 - Those paths are still right when Python is run through a symlink

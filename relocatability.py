@@ -35,6 +35,37 @@ STDLIB_PROBES = {
 STATUS_COLORS = {"PASS": "\033[32m", "FAIL": "\033[31m", "SKIP": "\033[33m"}
 RESET_COLOR = "\033[0m"
 
+# Prints the file the C API was loaded from: libpython for a shared build,
+# the executable itself for a static one. dladdr() works on Linux and macOS.
+LIBPYTHON_PROBE = r"""
+import json
+import os
+
+try:
+    import ctypes
+except ImportError as exc:
+    print(json.dumps({"skip": f"ctypes is not available: {exc}"}))
+    raise SystemExit
+
+
+class DlInfo(ctypes.Structure):
+    _fields_ = [
+        ("dli_fname", ctypes.c_char_p),
+        ("dli_fbase", ctypes.c_void_p),
+        ("dli_sname", ctypes.c_char_p),
+        ("dli_saddr", ctypes.c_void_p),
+    ]
+
+
+dladdr = ctypes.CDLL(None).dladdr
+dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(DlInfo)]
+info = DlInfo()
+address = ctypes.cast(ctypes.pythonapi.Py_Initialize, ctypes.c_void_p)
+if not dladdr(address, ctypes.byref(info)) or not info.dli_fname:
+    raise SystemExit("dladdr() could not find Py_Initialize")
+print(json.dumps({"path": os.path.realpath(os.fsdecode(info.dli_fname))}))
+"""
+
 # Seconds to wait for each probe.
 TIMEOUT = 30
 
@@ -226,6 +257,7 @@ class RelocatabilityHarness:
         """Run all the checks and return their results."""
         self._check("runtime.startup", self._check_startup)
         self._check("runtime.paths", self._check_runtime_paths)
+        self._check("runtime.libpython", self._check_libpython)
         self._check("metadata.prefix-leaks", self._check_prefix_leaks)
         for module in STDLIB_PROBES:
             self._check(
@@ -385,6 +417,27 @@ class RelocatabilityHarness:
                 failures,
             )
         return "runtime and sysconfig paths resolve inside the relocated tree"
+
+    def _check_libpython(self) -> str:
+        if self.snapshot is None:
+            raise CheckSkipped("the startup probe did not complete")
+        completed = self._run_python(["-I", "-c", LIBPYTHON_PROBE])
+        self._require_success(completed, "the libpython probe failed")
+        try:
+            result = json.loads(completed.stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:
+            raise CheckFailed(
+                "the libpython probe did not produce valid JSON",
+                [completed.stdout.rstrip(), completed.stderr.rstrip()],
+            ) from exc
+        if "skip" in result:
+            raise CheckSkipped(result["skip"])
+        if not path_is_within(result["path"], self.root):
+            raise CheckFailed(
+                "the C API is loaded from outside the relocated tree",
+                [result["path"]],
+            )
+        return f"the C API is loaded from {result['path']}"
 
     def _check_prefix_leaks(self) -> str:
         binary_needles = {
