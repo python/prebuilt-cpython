@@ -48,7 +48,6 @@ class Dependency:
 
     name: str
     version: str
-    url: str
     sha256: str
     # Commands run in the unpacked source directory. "{prefix}" and "{jobs}"
     # are replaced with the install directory and the number of make jobs.
@@ -58,20 +57,23 @@ class Dependency:
     def basename(self) -> str:
         return f"{self.name}-{self.version}"
 
+    @property
+    def url(self) -> str:
+        return f"{SOURCE_DEPS_URL}/archive/refs/tags/{self.basename}.tar.gz"
+
 
 # Libraries for the extension modules that macOS doesn't provide (_ssl,
 # _hashlib, _lzma, _zstd and _decimal). Only static libraries are installed,
 # so the extension modules don't link against anything outside the
 # installation.
-# The OpenSSL, XZ and mpdecimal versions and checksums match
-# Mac/BuildScript/build-installer.py; the zstd version matches
-# Platforms/Apple, and its checksum is the one published with the release.
+# The sources are tags of SOURCE_DEPS_URL, which CPython's Windows build also
+# uses. The checksums are of GitHub's archives of those tags.
+SOURCE_DEPS_URL = "https://github.com/python/cpython-source-deps"
 DEPENDENCIES = (
     Dependency(
         "openssl",
         "3.5.9",
-        "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
-        "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+        "d6cf0d9a651f25fe506f6b3dc133a80b9b79a0bc565f570dcf8fdbd597551485",
         (
             (
                 "./Configure",
@@ -88,10 +90,12 @@ DEPENDENCIES = (
     ),
     Dependency(
         "xz",
-        "5.2.3",
-        "https://tukaani.org/xz/xz-5.2.3.tar.gz",
-        "71928b357d0a09a12a4b4c5fafca8c31c19b0e7d3b8ebb19622e96f26dbf28cb",
+        # The newer xz tags only have what the Windows build needs.
+        "5.2.5",
+        "a15c168e39e87d750c3dc766edc7f19bdda57dacf01e509678467eace91ad282",
         (
+            # This tag's scripts aren't marked executable.
+            ("sh", "-c", "chmod +x configure build-aux/*"),
             (
                 "./configure",
                 "--prefix={prefix}",
@@ -113,8 +117,7 @@ DEPENDENCIES = (
     Dependency(
         "zstd",
         "1.5.7",
-        "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz",
-        "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3",
+        "f24b52470d12f466e9fa4fcc94e6c530625ada51d7b36de7fdc6ed7e6f499c8e",
         (
             (
                 "make",
@@ -130,9 +133,8 @@ DEPENDENCIES = (
     ),
     Dependency(
         "mpdecimal",
-        "4.0.1",
-        "https://www.bytereef.org/software/mpdecimal/releases/mpdecimal-4.0.1.tar.gz",
-        "96d33abb4bb0070c7be0fed4246cd38416188325f820468214471938545b1ac8",
+        "4.0.0",
+        "338fac3fb8cdd60f406b6326431338756f58a8af94229ffd9bf1e7c2b1ad71ca",
         (
             ("./configure", "--prefix={prefix}", "--disable-cxx"),
             ("make", "-j{jobs}"),
@@ -255,6 +257,9 @@ def run_deps(deps_dir: pathlib.Path) -> None:
             shutil.rmtree(source_dir)
         with tarfile.open(archive) as tar:
             tar.extractall(source_dir.parent, filter="data")
+        (source_dir.parent / f"cpython-source-deps-{dependency.basename}").rename(
+            source_dir
+        )
         for command in dependency.commands:
             subprocess.run(
                 [arg.format(prefix=install_dir, jobs=jobs) for arg in command],
