@@ -36,6 +36,15 @@ It's broken up into subcommands to configure, make, gather, and test a relocatab
 
 The defaults will result in builddir/ containing the build and dist/ containing the files that comprise a relocatable build.
 
+Some stdlib extension modules need third-party libraries that macOS doesn't provide, so without a package manager, `_ssl`, `_hashlib`, `_lzma`, `_zstd` and `_decimal` aren't built. To build those libraries (OpenSSL, XZ, zstd and mpdecimal) from source, run `deps` first and pass its directory to `configure`:
+
+```shell
+../prebuilt-cpython/relocatable.py deps
+../prebuilt-cpython/relocatable.py configure --deps-dir deps
+```
+
+`deps` downloads each source archive from [cpython-source-deps](https://github.com/python/cpython-source-deps), checks it, and installs only static libraries into deps/install, so the extension modules don't link against anything outside the installation. OpenSSL still has compiled-in paths for its configuration and modules under deps/install. Use `--deps-dir DIR` to put them somewhere else.
+
 The key thing to note is which patching approach to specify with `relocatable.py gather`. There are:
 
 - `--patch` which rewrites all found paths of the placeholder `--prefix` argument to the target install directory (which defaults to dist/); this is meant to follow the approach used by conda.
