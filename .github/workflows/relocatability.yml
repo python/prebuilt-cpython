@@ -7,7 +7,6 @@ name: Relocatability
 
 on:
   push:
-    branches: [main]
   pull_request:
   schedule:
     # Daily, to track changes in CPython main.
@@ -24,8 +23,8 @@ concurrency:
 jobs:
   test:
     name: ${{ matrix.os }}
-    # Forks get the schedule too; only run it here.
-    if: github.event_name != 'schedule' || github.repository == 'python/prebuilt-cpython'
+    # Forks get the schedule too; only run it in the original repository.
+    if: github.event_name != 'schedule' || github.event.repository.fork == false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -33,18 +32,18 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: prebuilt-cpython
           persist-credentials: false
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: python/cpython
           path: cpython
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.14"
+          python-version: "3.x"
 
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -96,7 +95,7 @@ jobs:
               lines.append("")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write("\n".join(lines) + "\n")
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: relocatability-${{ matrix.os }}
