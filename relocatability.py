@@ -769,9 +769,14 @@ class RelocatabilityHarness:
     def _check_c_extension(self) -> str:
         if self.snapshot is None:
             raise CheckSkipped("the startup probe did not complete")
-        config = self._python_config()
-        includes = self._run([config, "--includes"])
-        self._require_success(includes, "python-config --includes failed")
+        # Ask sysconfig, as build tools do. python-config's output can't
+        # be split into arguments when the path contains spaces.
+        paths = self.snapshot.get("config_paths") or {}
+        includes = [
+            f"-I{paths[name]}" for name in ("include", "platinclude") if paths.get(name)
+        ]
+        if not includes:
+            raise CheckFailed("sysconfig did not provide the include directories")
         ldshared = self.snapshot.get("ldshared")
         ext_suffix = self.snapshot.get("ext_suffix")
         if not isinstance(ldshared, str) or not ldshared:
@@ -824,7 +829,7 @@ PyInit_reloc_probe(void)
             *shlex.split(ldshared),
             # e.g. -fPIC on Linux; LDSHARED doesn't include it.
             *shlex.split(self.snapshot.get("ccshared") or ""),
-            *shlex.split(includes.stdout),
+            *includes,
             os.fspath(source),
             "-o",
             os.fspath(extension),
