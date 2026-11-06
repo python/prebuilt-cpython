@@ -85,13 +85,15 @@ jobs:
         run: |
           import json, os
 
+          colours = {"PASS": "🟢", "FAIL": "🔴", "SKIP": "🟡"}
+
           lines = []
           for strategy in ("patch", "origin"):
               # Fails the job if the harness crashed instead of reporting.
               with open(f"results-{strategy}.json") as file:
                   results = json.load(file)
               lines += [f"### `--strategy {strategy}`", "", "| Check | Status | Summary |", "|---|---|---|"]
-              lines += [f"| `{r['name']}` | {r['status']} | {r['summary']} |" for r in results]
+              lines += [f"| `{r['name']}` | {colours[r['status']]} {r['status']} | {r['summary']} |" for r in results]
               lines.append("")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write("\n".join(lines) + "\n")
