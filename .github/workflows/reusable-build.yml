@@ -1,0 +1,140 @@
+name: Reusable build
+
+# Build CPython and run `relocatable.py test` against it. Some checks fail
+# until CPython is fixed, so failed checks don't fail the job; the results
+# are in the job summary and the uploaded JSON. The job only fails if the
+# build or the harness itself breaks.
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: CPython repository to build
+        type: string
+        default: python/cpython
+      ref:
+        description: Branch, tag or commit to build (default branch if empty)
+        type: string
+        default: ""
+      artifacts:
+        description: Also gather the build and upload it as an artifact
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: prebuilt-cpython
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          path: cpython
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config patchelf \
+            libbz2-dev libffi-dev libgdbm-dev liblzma-dev libncurses-dev \
+            libreadline-dev libsqlite3-dev libssl-dev libzstd-dev uuid-dev \
+            zlib1g-dev
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install pkg-config
+      - name: Build dependencies (macOS)
+        if: runner.os == 'macOS'
+        working-directory: cpython
+        run: python ../prebuilt-cpython/relocatable.py deps
+
+      - name: Record the CPython commit
+        id: commit
+        working-directory: cpython
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+        run: |
+          git log -1 --format="$REPOSITORY at %h (%cs)" | tee -a "$GITHUB_STEP_SUMMARY"
+          os=$(uname -s | tr '[:upper:]' '[:lower:]')
+          echo "name=cpython-$(git rev-parse --short=12 HEAD)-$os-$(uname -m)" >> "$GITHUB_OUTPUT"
+      - name: Configure
+        working-directory: cpython
+        run: python ../prebuilt-cpython/relocatable.py configure ${{ runner.os == 'macOS' && '--deps-dir deps' || '' }}
+      - name: Build
+        working-directory: cpython
+        run: python ../prebuilt-cpython/relocatable.py make
+
+      - name: Test (patch)
+        working-directory: cpython
+        continue-on-error: true
+        run: python ../prebuilt-cpython/relocatable.py test --strategy patch --format json > ../results-patch.json
+      - name: Test (origin)
+        working-directory: cpython
+        continue-on-error: true
+        run: python ../prebuilt-cpython/relocatable.py test --strategy origin --format json > ../results-origin.json
+
+      - name: Summarize
+        shell: python
+        run: |
+          import json, os
+
+          colours = {"PASS": "🟢", "FAIL": "🔴", "SKIP": "🟡"}
+
+          lines = []
+          for strategy in ("patch", "origin"):
+              # Fails the job if the harness crashed instead of reporting.
+              with open(f"results-{strategy}.json") as file:
+                  results = json.load(file)
+              lines += [f"### `--strategy {strategy}`", "", "| Check | Status | Summary |", "|---|---|---|"]
+              lines += [f"| `{r['name']}` | {colours[r['status']]}&nbsp;{r['status']} | {r['summary']} |" for r in results]
+              lines.append("")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n".join(lines) + "\n")
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: relocatability-${{ matrix.os }}
+          path: results-*.json
+          if-no-files-found: ignore
+
+      # `gather --origin` is Linux only. The tarballs keep the symlinks and
+      # file modes that the artifact zip drops.
+      - name: Gather
+        if: inputs.artifacts
+        working-directory: cpython
+        env:
+          NAME: ${{ steps.commit.outputs.name }}
+          STRATEGIES: ${{ runner.os == 'Linux' && 'patch origin' || 'patch' }}
+        run: |
+          for strategy in $STRATEGIES; do
+            python ../prebuilt-cpython/relocatable.py gather --output "$GITHUB_WORKSPACE/python" "--$strategy"
+            tar -C "$GITHUB_WORKSPACE" -czf "$GITHUB_WORKSPACE/$NAME-$strategy.tar.gz" python
+          done
+      - uses: actions/upload-artifact@v7
+        if: inputs.artifacts
+        with:
+          name: ${{ steps.commit.outputs.name }}-patch
+          path: ${{ steps.commit.outputs.name }}-patch.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: inputs.artifacts && runner.os == 'Linux'
+        with:
+          name: ${{ steps.commit.outputs.name }}-origin
+          path: ${{ steps.commit.outputs.name }}-origin.tar.gz
+          if-no-files-found: error
