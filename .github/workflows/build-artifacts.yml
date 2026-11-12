@@ -1,0 +1,25 @@
+name: Build artifacts
+
+# Build CPython and upload the gathered tree as workflow artifacts, for
+# trying out a build. The job summary lists the checks the build fails.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: CPython repository to build
+        default: python/cpython
+      ref:
+        description: Branch, tag or commit to build
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      repository: ${{ inputs.repository }}
+      ref: ${{ inputs.ref }}
+      artifacts: true
