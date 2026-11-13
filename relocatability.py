@@ -256,6 +256,25 @@ def build_details_problems(
     return problems
 
 
+def pkg_config_problems(cflags: str, libs: str, root: pathlib.Path) -> list[str]:
+    """Return what's wrong with pkg-config's `--cflags` and `--libs` output.
+
+    The `-I` and `-L` directories must be inside *root*, and Python.h must
+    be in one of the `-I` directories. Whether libpython is installed isn't
+    checked: the files name it even in a build that doesn't install one.
+    """
+    includes = [flag[2:] for flag in shlex.split(cflags) if flag.startswith("-I")]
+    lib_dirs = [flag[2:] for flag in shlex.split(libs) if flag.startswith("-L")]
+    problems = [
+        f"{directory} is outside the relocated tree"
+        for directory in (*includes, *lib_dirs)
+        if not path_is_within(directory, root)
+    ]
+    if not any(pathlib.Path(d, "Python.h").is_file() for d in includes):
+        problems.append("no include directory contains Python.h")
+    return problems
+
+
 def find_build_interpreter(build_dir: pathlib.Path) -> pathlib.Path:
     """Return the interpreter built in *build_dir*.
 
@@ -360,6 +379,7 @@ class RelocatabilityHarness:
         self._check("metadata.prefix-leaks", self._check_prefix_leaks)
         self._check("metadata.build-details", self._check_build_details)
         self._check("developer.python-config", self._check_python_config)
+        self._check("developer.pkg-config", self._check_pkg_config)
         for module in STDLIB_PROBES:
             self._check(
                 f"stdlib.{module}",
@@ -669,6 +689,43 @@ class RelocatabilityHarness:
             failures.extend(errors)
             raise CheckFailed("python-config reports stale paths", failures)
         return "python-config reports the relocated prefix"
+
+    def _check_pkg_config(self) -> str:
+        tool = shutil.which("pkg-config") or shutil.which("pkgconf")
+        if tool is None:
+            raise CheckSkipped("pkg-config is not installed")
+        pc_dir = self.root / "lib" / "pkgconfig"
+        modules = sorted(
+            path.stem for path in pc_dir.glob("python-*.pc") if not path.is_symlink()
+        )
+        if not modules:
+            raise CheckFailed("no installed pkg-config file found", [os.fspath(pc_dir)])
+        # Like Meson: add the installation's own directory to the search path.
+        env = {
+            name: value
+            for name, value in self.env.items()
+            if not name.startswith("PKG_CONFIG_")
+        }
+        env["PKG_CONFIG_PATH"] = os.fspath(pc_dir)
+
+        def problems(module: str, *options: str) -> list[str]:
+            outputs = []
+            for query in ("--cflags", "--libs"):
+                completed = self._run([tool, *options, query, module], env=env)
+                self._require_success(completed, f"pkg-config {query} {module} failed")
+                outputs.append(completed.stdout.strip())
+            found = pkg_config_problems(*outputs, self.root)
+            return [f"{module}: {problem}" for problem in found]
+
+        failures = [failure for module in modules for failure in problems(module)]
+        if failures:
+            # Tells whether a consumer can work around a stale prefix today.
+            works = not any(problems(module, "--define-prefix") for module in modules)
+            failures.append(
+                f"with --define-prefix: {'no problems' if works else 'still fails'}"
+            )
+            raise CheckFailed("pkg-config reports stale paths", failures)
+        return f"pkg-config resolves {', '.join(modules)} inside the relocated tree"
 
     def _check_stdlib(self, module: str) -> str:
         if self.broken_modules is not None and module in self.broken_modules:
