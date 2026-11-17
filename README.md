@@ -69,7 +69,7 @@ python3 ../prebuilt-cpython/fixup.py dist/
 - Every stdlib extension module that imports in the build directory still imports, from inside the moved tree
 - Those paths are still right when Python is run through a symlink
 - A venv created from it works
-- `build-details.json` and `python-config` give paths inside the moved tree
+- `build-details.json`, `python-config` and `pkg-config` (when installed) give paths inside the moved tree
 - A C extension builds against it and imports
 - Native files don't link against libraries outside the moved tree
 
