@@ -83,6 +83,13 @@ Use `--relative-rpath` to gather with `--relative-rpath`, `--no-fixup` to check 
 
 The Relocatability GitHub Actions workflow runs `test` in each of those modes against CPython `main` on Linux and macOS, daily and for each pull request. Each run's summary lists the results, and the JSON is attached to the run.
 
+The Build artifacts workflow is run by hand and also attaches the build to the run: a tarball per platform with the gathered tree in `python/` and `fixup.py` next to it. To try one, unpack it, move `python/` to where it should live, and run `fixup.py` on it:
+
+```shell
+tar -xf cpython-<commit>-<os>-<arch>.tar.gz
+python3 cpython-<commit>-<os>-<arch>/fixup.py cpython-<commit>-<os>-<arch>/python
+```
+
 If the build wasn't configured by `relocatable.py configure`, `fixup.py` isn't run, and its `--prefix` is treated as the old location. If that directory still exists, the `distribution.isolation` check fails, because the moved build might be using files from it without anyone noticing.
 
 ## Project Representatives
