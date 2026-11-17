@@ -80,14 +80,20 @@ jobs:
         working-directory: cpython
         run: python ../prebuilt-cpython/relocatable.py make
 
-      - name: Test (patch)
+      - name: Test
         working-directory: cpython
         continue-on-error: true
-        run: python ../prebuilt-cpython/relocatable.py test --strategy patch --format json > ../results-patch.json
-      - name: Test (origin)
+        run: python ../prebuilt-cpython/relocatable.py test --format json > ../results.json
+      # `--relative-rpath` only changes ELF files.
+      - name: Test (relative rpath)
+        if: runner.os == 'Linux'
         working-directory: cpython
         continue-on-error: true
-        run: python ../prebuilt-cpython/relocatable.py test --strategy origin --format json > ../results-origin.json
+        run: python ../prebuilt-cpython/relocatable.py test --relative-rpath --format json > ../results-relative-rpath.json
+      - name: Test (no fixup)
+        working-directory: cpython
+        continue-on-error: true
+        run: python ../prebuilt-cpython/relocatable.py test --no-fixup --format json > ../results-no-fixup.json
 
       - name: Summarize
         shell: python
@@ -97,11 +103,14 @@ jobs:
           colours = {"PASS": "🟢", "FAIL": "🔴", "SKIP": "🟡"}
 
           lines = []
-          for strategy in ("patch", "origin"):
+          tables = {"test": "results.json", "test --no-fixup": "results-no-fixup.json"}
+          if os.environ["RUNNER_OS"] == "Linux":
+              tables["test --relative-rpath"] = "results-relative-rpath.json"
+          for command, filename in tables.items():
               # Fails the job if the harness crashed instead of reporting.
-              with open(f"results-{strategy}.json") as file:
+              with open(filename) as file:
                   results = json.load(file)
-              lines += [f"### `--strategy {strategy}`", "", "| Check | Status | Summary |", "|---|---|---|"]
+              lines += [f"### `{command}`", "", "| Check | Status | Summary |", "|---|---|---|"]
               lines += [f"| `{r['name']}` | {colours[r['status']]}&nbsp;{r['status']} | {r['summary']} |" for r in results]
               lines.append("")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
@@ -110,31 +119,23 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: relocatability-${{ matrix.os }}
-          path: results-*.json
+          path: results*.json
           if-no-files-found: ignore
 
-      # `gather --origin` is Linux only. The tarballs keep the symlinks and
-      # file modes that the artifact zip drops.
+      # fixup.py goes with the tree. The tarball keeps the symlinks and file
+      # modes that the artifact zip drops.
       - name: Gather
         if: inputs.artifacts
         working-directory: cpython
         env:
           NAME: ${{ steps.commit.outputs.name }}
-          STRATEGIES: ${{ runner.os == 'Linux' && 'patch origin' || 'patch' }}
         run: |
-          for strategy in $STRATEGIES; do
-            python ../prebuilt-cpython/relocatable.py gather --output "$GITHUB_WORKSPACE/python" "--$strategy"
-            tar -C "$GITHUB_WORKSPACE" -czf "$GITHUB_WORKSPACE/$NAME-$strategy.tar.gz" python
-          done
+          python ../prebuilt-cpython/relocatable.py gather --output "$GITHUB_WORKSPACE/$NAME/python"
+          cp ../prebuilt-cpython/fixup.py "$GITHUB_WORKSPACE/$NAME/"
+          tar -C "$GITHUB_WORKSPACE" -czf "$GITHUB_WORKSPACE/$NAME.tar.gz" "$NAME"
       - uses: actions/upload-artifact@v7
         if: inputs.artifacts
         with:
-          name: ${{ steps.commit.outputs.name }}-patch
-          path: ${{ steps.commit.outputs.name }}-patch.tar.gz
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v7
-        if: inputs.artifacts && runner.os == 'Linux'
-        with:
-          name: ${{ steps.commit.outputs.name }}-origin
-          path: ${{ steps.commit.outputs.name }}-origin.tar.gz
+          name: ${{ steps.commit.outputs.name }}
+          path: ${{ steps.commit.outputs.name }}.tar.gz
           if-no-files-found: error

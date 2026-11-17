@@ -30,7 +30,7 @@ It's broken up into subcommands to configure, make, gather, and test a relocatab
 ```shell
 ../prebuilt-cpython/relocatable.py configure
 ../prebuilt-cpython/relocatable.py make
-../prebuilt-cpython/relocatable.py gather <patching approach>
+../prebuilt-cpython/relocatable.py gather
 ../prebuilt-cpython/relocatable.py test
 ```
 
@@ -45,16 +45,21 @@ Some stdlib extension modules need third-party libraries that macOS doesn't prov
 
 `deps` downloads each source archive from [cpython-source-deps](https://github.com/python/cpython-source-deps), checks it, and installs only static libraries into deps/install, so the extension modules don't link against anything outside the installation. OpenSSL still has compiled-in paths for its configuration and modules under deps/install. Use `--deps-dir DIR` to put them somewhere else.
 
-The key thing to note is which patching approach to specify with `relocatable.py gather`. There are:
+`configure` uses a placeholder `--prefix`. `gather` runs CPython's top-level `make install ENSUREPIP=no` into a staging `DESTDIR` and moves the installed prefix into place, so the gathered tree contains everything a normal install provides (such as `build-details.json` and the unversioned `python3` links). The tree still has the placeholder in it, so it isn't tied to a location and can be packed up as is.
 
-- `--patch` which rewrites all found paths of the placeholder `--prefix` argument to the target install directory (which defaults to dist/); this is meant to follow the approach used by conda.
-- `--origin` which uses `patchelf` to do a more targeted path rewrite upfront and then to patch any remaining paths; this is meant to follow the approach used by python-build-standalone.
+Replacing the placeholder is a separate step, done at install time. Once the tree is where it will live, run `fixup.py` on it with any Python 3.12+ other than the one in the tree:
 
-Either way, `gather` runs CPython's top-level `make install ENSUREPIP=no` into a staging `DESTDIR` and moves the installed prefix into place, so the gathered tree contains everything a normal install provides (such as `build-details.json` and the unversioned `python3` links). Only the placeholder prefix is rewritten, and patched Mach-O files are re-signed ad hoc, since macOS refuses to run binaries whose code signature no longer matches.
+```shell
+python3 ../prebuilt-cpython/fixup.py dist/
+```
+
+`fixup.py` replaces the placeholder with the tree's location in text files only and lists the binary files that still contain it. It never modifies a binary, so signatures stay valid. It fails if no text file in the tree has the placeholder, which is the case for a tree it has already been run on.
+
+`gather --relative-rpath` also uses `patchelf` to give the installed ELF files an `$ORIGIN`-relative RPATH, so they load libraries from inside the tree wherever it ends up; this follows what python-build-standalone does at build time. It's Linux only.
 
 ### Testing a relocated build
 
-`relocatable.py test` checks whether a build still works after it has been moved. It gathers the build into a temporary directory (dist/ is left alone), renames that directory to a path of a different length with spaces in it, and runs these checks without patching anything again:
+`relocatable.py test` checks whether a build still works after it has been moved. It gathers the build into a temporary directory (dist/ is left alone), renames that directory to a path of a different length with spaces in it, runs `fixup.py` on it, and runs these checks:
 
 - The interpreter starts
 - `sys` and `sysconfig` paths point inside the moved tree
@@ -74,11 +79,18 @@ Each check prints `PASS`, `FAIL`, or `SKIP` (in color on a terminal, unless `NO_
 ../prebuilt-cpython/relocatable.py test
 ```
 
-Use `--strategy origin` to gather with `--origin` (the default is `--patch`), `--full` to also run `python -m test --fast-ci`, `--work-dir DIR` to keep the temporary files (including `gather.log`, the `make install` output), and `--format json` for JSON output.
+Use `--relative-rpath` to gather with `--relative-rpath`, `--no-fixup` to check the moved tree without running `fixup.py` (what a build that needs no install-time step would have to pass), `--full` to also run `python -m test --fast-ci`, `--work-dir DIR` to keep the temporary files (including `gather.log`, the `make install` output), and `--format json` for JSON output.
 
-The Relocatability GitHub Actions workflow runs `test` with both strategies against CPython `main` on Linux and macOS, daily and for each pull request. Each run's summary lists the results, and the JSON is attached to the run.
+The Relocatability GitHub Actions workflow runs `test` in each of those modes against CPython `main` on Linux and macOS, daily and for each pull request. Each run's summary lists the results, and the JSON is attached to the run.
 
-If the build wasn't configured by `relocatable.py configure`, its `--prefix` is left alone and treated as the old location. If that directory still exists, the `distribution.isolation` check fails, because the moved build might be using files from it without anyone noticing.
+The Build artifacts workflow is run by hand and also attaches the build to the run: a tarball per platform with the gathered tree in `python/` and `fixup.py` next to it. To try one, unpack it, move `python/` to where it should live, and run `fixup.py` on it:
+
+```shell
+tar -xf cpython-<commit>-<os>-<arch>.tar.gz
+python3 cpython-<commit>-<os>-<arch>/fixup.py cpython-<commit>-<os>-<arch>/python
+```
+
+If the build wasn't configured by `relocatable.py configure`, `fixup.py` isn't run, and its `--prefix` is treated as the old location. If that directory still exists, the `distribution.isolation` check fails, because the moved build might be using files from it without anyone noticing.
 
 ## Project Representatives
 These are people representing projects that have experience with prebuilt binaries for CPython.
