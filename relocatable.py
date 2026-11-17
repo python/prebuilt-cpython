@@ -24,6 +24,7 @@ import tempfile
 import urllib.request
 from typing import TextIO
 
+from fixup import PLACEHOLDER
 from relocatability import (
     CheckFailed,
     CheckResult,
@@ -35,11 +36,7 @@ from relocatability import (
 )
 
 
-# Thin 32/64-bit Mach-O files in either byte order, and universal binaries.
-MACHO_MAGIC = {
-    bytes.fromhex(magic)
-    for magic in ("feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe")
-}
+FIXUP_SCRIPT = pathlib.Path(__file__).with_name("fixup.py")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -146,7 +143,7 @@ DEPENDENCIES = (
 
 def placeholder_prefix() -> str:
     """Return the placeholder prefix used when building CPython."""
-    return "/the/knights/who/say/ni".ljust(255, "i")
+    return PLACEHOLDER
 
 
 def configured_prefix(build_dir: pathlib.Path) -> str:
@@ -158,40 +155,7 @@ def configured_prefix(build_dir: pathlib.Path) -> str:
     raise ValueError(f"no prefix found in {makefile}")
 
 
-def patch_path(output_dir: pathlib.Path, patch: str) -> None:
-    """Replace placeholder prefixes with an eventual installation path."""
-    target = os.fsencode(pathlib.Path(patch).resolve())
-    placeholder = os.fsencode(placeholder_prefix())
-    if len(target) > len(placeholder):
-        raise ValueError(
-            f"resolved patch path is {len(target)} bytes; "
-            f"the maximum is {len(placeholder)} bytes"
-        )
-
-    for root, _, filenames in output_dir.walk():
-        for filename in filenames:
-            path = root / filename
-            if path.is_symlink():
-                continue
-            contents = path.read_bytes()
-            if placeholder not in contents:
-                continue
-            replacement = target
-            if b"\0" in contents:
-                replacement = target.ljust(len(placeholder), b"\0")
-            path.write_bytes(contents.replace(placeholder, replacement))
-            if contents[:4] in MACHO_MAGIC:
-                # Rewriting a Mach-O file invalidates its (ad-hoc) code
-                # signature, and arm64 macOS kills processes that load it.
-                subprocess.run(
-                    ["codesign", "--force", "--sign", "-", path],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-
-
-def patch_origin(output_dir: pathlib.Path) -> None:
+def set_relative_rpath(output_dir: pathlib.Path) -> None:
     """Make installed ELF files load libraries relative to themselves."""
     lib_dir = output_dir / "lib"
     for root, _, filenames in output_dir.walk():
@@ -318,16 +282,15 @@ def run_gather(
     source_dir: pathlib.Path,
     build_dir: pathlib.Path,
     output_dir: pathlib.Path,
-    strategy: str,
-    install_dir: pathlib.Path,
+    relative_rpath: bool = False,
     log_file: TextIO | None = None,
 ) -> None:
     """Gather all the release files together.
 
     The build is installed exactly as configured (into a staging `DESTDIR`)
-    and the resulting prefix is moved to *output_dir*. Only the placeholder
-    prefix from `configure` is rewritten; a build configured with any other
-    prefix keeps it, so the gathered tree is a moved copy of that install.
+    and the resulting prefix is moved to *output_dir*. The tree keeps the
+    prefix it was configured with; fixup.py replaces the placeholder
+    prefix once the tree is where it will live.
     """
     output_dir = output_dir.resolve()
     if output_dir.exists():
@@ -359,23 +322,23 @@ def run_gather(
                 f"(e.g. a separate --exec-prefix), which cannot be gathered: "
                 f"{leftovers[:5]}"
             )
-    if strategy == "origin":
+    if relative_rpath:
         # python-build-standalone also patches CPython's source, rewrites
         # scripts and metadata, handles Mach-O, and ships shared libpython.
         # Those are intentionally excluded from this post-build ELF experiment.
-        patch_origin(output_dir)
-    patch_path(output_dir, os.fspath(install_dir))
+        set_relative_rpath(output_dir)
 
 
 def run_test(
     source_dir: pathlib.Path,
     build_dir: pathlib.Path,
-    strategy: str,
+    relative_rpath: bool,
+    run_fixup: bool,
     work_dir: pathlib.Path | None,
     output_format: str,
     full: bool,
 ) -> int:
-    """Gather a build, move it, and check that it still works."""
+    """Gather a build, move it, run fixup.py, and check that it works."""
 
     def run(workspace: pathlib.Path) -> list[CheckResult]:
         original_prefix = workspace / "original-prefix"
@@ -390,6 +353,7 @@ def run_test(
 
         # `make install` prints thousands of lines, which would bury the results.
         gather_log = workspace / "gather.log"
+        fixup_output = []
         try:
             prefix = configured_prefix(build_dir)
             with gather_log.open("w", encoding="utf-8") as log_file:
@@ -397,13 +361,25 @@ def run_test(
                     source_dir,
                     build_dir,
                     original_prefix,
-                    strategy,
-                    original_prefix,
+                    relative_rpath,
                     log_file,
                 )
             original_prefix.rename(relocated_prefix)
+            # fixup.py only knows the placeholder prefix.
+            with_fixup = run_fixup and prefix == placeholder_prefix()
+            if with_fixup:
+                # Run it the way a user would, with a Python that isn't the
+                # one in the tree.
+                fixup_output = subprocess.run(
+                    [sys.executable, FIXUP_SCRIPT, relocated_prefix],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.splitlines()
         except (OSError, ValueError, subprocess.CalledProcessError) as exc:
             details = []
+            if stderr := getattr(exc, "stderr", None):
+                details.append(stderr.strip())
             if gather_log.exists():
                 lines = gather_log.read_text(errors="replace").splitlines()
                 if lines:
@@ -418,18 +394,21 @@ def run_test(
                 )
             ]
 
-        if prefix == placeholder_prefix():
+        if with_fixup:
             stale_prefix = None
-            summary = "gathered the installation and moved it without repatching"
+            summary = "gathered the installation, moved it and ran fixup.py"
+        elif prefix == placeholder_prefix():
+            stale_prefix = None
+            summary = "gathered the installation and moved it without running fixup.py"
         else:
             # A build we didn't configure keeps its --prefix, so that's the
             # old location to look for.
             stale_prefix = pathlib.PurePosixPath(prefix)
             summary = (
                 f"installed the build configured for {prefix} "
-                "and moved it without patching"
+                "and moved it without running fixup.py"
             )
-        results = [CheckResult("distribution.move", "PASS", summary)]
+        results = [CheckResult("distribution.move", "PASS", summary, fixup_output)]
         if stale_prefix is not None and os.path.lexists(stale_prefix):
             # The moved build could load libpython or the stdlib from the
             # old prefix and every other check would still pass.
@@ -511,29 +490,26 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         type=pathlib.Path,
         help="distribution directory (default: SOURCE_DIR/dist)",
     )
-    patch_group = gather_parser.add_mutually_exclusive_group(required=True)
-    patch_group.add_argument(
-        "--patch",
-        nargs="?",
-        const=None,
-        default=argparse.SUPPRESS,
-        type=pathlib.Path,
-        metavar="INSTALL_DIR",
-        help=(
-            "patch in the eventual install directory (default: OUTPUT); "
-            "relative paths resolve from the current directory"
-        ),
+    relative_rpath_help = (
+        "set an $ORIGIN-relative RPATH on the installed ELF files, so they "
+        "load libraries from inside the tree (Linux only; requires patchelf)"
+    )
+    gather_parser.add_argument(
+        "--relative-rpath", action="store_true", help=relative_rpath_help
     )
     test_parser = subparsers.add_parser(
         "test",
         parents=[common_parser],
-        help="Gather a build, move it, and check that it still works",
+        help="Gather a build, move it, run fixup.py, and check that it works",
     )
     test_parser.add_argument(
-        "--strategy",
-        choices=("patch", "origin"),
-        default="patch",
-        help="gather strategy (default: patch)",
+        "--relative-rpath", action="store_true", help=relative_rpath_help
+    )
+    test_parser.add_argument(
+        "--no-fixup",
+        dest="run_fixup",
+        action="store_false",
+        help="don't run fixup.py on the moved tree",
     )
     test_parser.add_argument(
         "--work-dir",
@@ -552,18 +528,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="also run `python -m test --fast-ci` from the relocated tree",
     )
-    patch_group.add_argument(
-        "--origin",
-        nargs="?",
-        const=None,
-        default=argparse.SUPPRESS,
-        type=pathlib.Path,
-        metavar="INSTALL_DIR",
-        help=(
-            "patch in the eventual install directory and use $ORIGIN for ELF "
-            "library lookup (default: OUTPUT; Linux only; requires patchelf)"
-        ),
-    )
     namespace = parser.parse_args(args)
     if namespace.build_dir is None:
         namespace.build_dir = namespace.source_dir / "builddir"
@@ -571,16 +535,6 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         namespace.deps_dir = namespace.source_dir / "deps"
     if namespace.command == "gather" and namespace.output_dir is None:
         namespace.output_dir = namespace.source_dir / "dist"
-    if namespace.command == "gather":
-        if hasattr(namespace, "patch"):
-            namespace.patch_strategy = "patch"
-            install_dir = namespace.patch
-        else:
-            namespace.patch_strategy = "origin"
-            install_dir = namespace.origin
-        if install_dir is None:
-            install_dir = namespace.output_dir
-        namespace.install_dir = install_dir
     return namespace
 
 
@@ -601,15 +555,15 @@ def main(args: list[str] | None = None) -> int:
                 namespace.source_dir,
                 namespace.build_dir,
                 namespace.output_dir,
-                namespace.patch_strategy,
-                namespace.install_dir,
+                namespace.relative_rpath,
             )
             return 0
         case "test":
             return run_test(
                 namespace.source_dir,
                 namespace.build_dir,
-                namespace.strategy,
+                namespace.relative_rpath,
+                namespace.run_fixup,
                 namespace.work_dir,
                 namespace.output_format,
                 namespace.full,
