@@ -20,9 +20,32 @@ for a tree it has already been run on.
 import argparse
 import os
 import pathlib
+import re
 import sys
 
 PLACEHOLDER = "/the/knights/who/say/ni".ljust(255, "i")
+# The first line of the Python scripts that CPython installs.
+SHEBANG = re.compile(
+    rb"#!(%s/bin/python[^/\s]*)\n" % re.escape(os.fsencode(PLACEHOLDER))
+)
+# Linux before 5.1 truncates a longer "#!" line.
+SHEBANG_LIMIT = 127
+
+
+def fix_shebang(contents: bytes, placeholder: bytes, prefix: bytes) -> bytes:
+    """Replace a "#!" line that wouldn't work with the new prefix.
+
+    A "#!" line can't name an interpreter whose path has spaces, and its
+    length is limited. Such a script is run by /bin/sh instead, with a
+    first statement that the shell reads as `exec` and Python as a string.
+    """
+    match = SHEBANG.match(contents)
+    if match is None:
+        return contents
+    python = match[1].replace(placeholder, prefix)
+    if not re.search(rb"\s", python) and len(python) + 2 <= SHEBANG_LIMIT:
+        return contents
+    return b"#!/bin/sh\n'exec' '%s' \"$0\" \"$@\"\n" % python + contents[match.end() :]
 
 
 def fixup(tree: pathlib.Path) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
@@ -57,6 +80,7 @@ def fixup(tree: pathlib.Path) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
             "it has already been fixed up or wasn't built by relocatable.py"
         )
     for path, contents in text.items():
+        contents = fix_shebang(contents, placeholder, prefix)
         path.write_bytes(contents.replace(placeholder, prefix))
     return sorted(text), sorted(binary)
 
