@@ -53,7 +53,7 @@ Replacing the placeholder is a separate step, done at install time. Once the tre
 python3 ../prebuilt-cpython/fixup.py dist/
 ```
 
-`fixup.py` replaces the placeholder with the tree's location in text files only and lists the binary files that still contain it. It never modifies a binary, so signatures stay valid. It fails if no text file in the tree has the placeholder, which is the case for a tree it has already been run on.
+`fixup.py` replaces the placeholder with the tree's location in text files only and lists the binary files that still contain it. It never modifies a binary, so signatures stay valid. A `#!` line can't hold a path with spaces and is limited in length, so where the tree's location doesn't fit in one, the installed Python scripts are run through `/bin/sh` instead. It fails if no text file in the tree has the placeholder, which is the case for a tree it has already been run on.
 
 `gather --relative-rpath` also uses `patchelf` to give the installed ELF files an `$ORIGIN`-relative RPATH, so they load libraries from inside the tree wherever it ends up; this follows what python-build-standalone does at build time. It's Linux only.
 
