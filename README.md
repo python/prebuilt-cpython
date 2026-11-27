@@ -45,7 +45,7 @@ Some stdlib extension modules need third-party libraries that macOS doesn't prov
 
 `deps` downloads each source archive from [cpython-source-deps](https://github.com/python/cpython-source-deps), checks it, and installs only static libraries into deps/install, so the extension modules don't link against anything outside the installation. OpenSSL still has compiled-in paths for its configuration and modules under deps/install. Use `--deps-dir DIR` to put them somewhere else.
 
-`configure` uses a placeholder `--prefix`. `gather` runs CPython's top-level `make install ENSUREPIP=no` into a staging `DESTDIR` and moves the installed prefix into place, so the gathered tree contains everything a normal install provides (such as `build-details.json` and the unversioned `python3` links). The tree still has the placeholder in it, so it isn't tied to a location and can be packed up as is.
+`configure` uses a placeholder `--prefix` and passes `--enable-relocatable`, CPython's opt-in for build changes that help an installation survive a move but aren't right for every build. So far it makes the installed pkg-config files take their prefix from their own location. A CPython without the option warns about it and carries on. `gather` runs CPython's top-level `make install ENSUREPIP=no` into a staging `DESTDIR` and moves the installed prefix into place, so the gathered tree contains everything a normal install provides (such as `build-details.json` and the unversioned `python3` links). The tree still has the placeholder in it, so it isn't tied to a location and can be packed up as is.
 
 Replacing the placeholder is a separate step, done at install time. Once the tree is where it will live, run `fixup.py` on it with any Python 3.12+ other than the one in the tree:
 

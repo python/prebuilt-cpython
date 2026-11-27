@@ -251,6 +251,7 @@ def run_configure(
         configure,
         f"--prefix={placeholder_prefix()}",
         "--without-static-libpython",
+        "--enable-relocatable",
     ]
     env = None
     if deps_dir is not None:
